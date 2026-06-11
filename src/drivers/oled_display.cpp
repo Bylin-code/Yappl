@@ -31,25 +31,11 @@ bool OledDisplay::begin() {
   g_oled.begin();
   g_oled.setContrast(180);
   clear();
-  drawStatus(F("Yappl"), F("Starting..."));
   return true;
 }
 
 void OledDisplay::clear() {
   g_oled.clearBuffer();
-  g_oled.sendBuffer();
-}
-
-void OledDisplay::drawStatus(const __FlashStringHelper *line1, const __FlashStringHelper *line2) {
-  drawStatus(String(line1).c_str(), String(line2).c_str());
-}
-
-void OledDisplay::drawStatus(const char *line1, const char *line2) {
-  g_oled.clearBuffer();
-  g_oled.setFont(u8g2_font_7x13B_tr);
-  g_oled.drawStr(8, 32, line1);
-  g_oled.setFont(u8g2_font_6x12_tr);
-  g_oled.drawStr(8, 54, line2);
   g_oled.sendBuffer();
 }
 
@@ -80,26 +66,6 @@ void OledDisplay::drawMeter(uint8_t level) {
   snprintf(label, sizeof(label), "%3u%%", level);
   g_oled.setFont(u8g2_font_6x12_tr);
   g_oled.drawStr(92, 112, label);
-  g_oled.sendBuffer();
-}
-
-void OledDisplay::sanityCheck() {
-  g_oled.clearBuffer();
-
-  // Checker pattern: useful for quickly spotting bad dimensions, rotation, or
-  // a driver configured for SSD1306 128x64 instead of SH1107 128x128.
-  for (uint8_t y = 0; y < kDisplayHeight; y += 8) {
-    for (uint8_t x = 0; x < kDisplayWidth; x += 8) {
-      if (((x + y) / 8) % 2 == 0) {
-        g_oled.drawBox(x, y, 8, 8);
-      }
-    }
-  }
-
-  g_oled.setDrawColor(2);
-  g_oled.setFont(u8g2_font_6x12_tr);
-  g_oled.drawStr(10, 68, "SH1107 128x128");
-  g_oled.setDrawColor(1);
   g_oled.sendBuffer();
 }
 

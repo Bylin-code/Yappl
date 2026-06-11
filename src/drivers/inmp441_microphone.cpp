@@ -114,22 +114,6 @@ bool Inmp441Microphone::readLevel(int32_t *scratch, size_t sampleCount, MicLevel
   return true;
 }
 
-bool Inmp441Microphone::sanityCheck() {
-  int32_t samples[AppConfig::micSampleCount] = {};
-  MicLevelStats stats;
-  if (!readLevel(samples, AppConfig::micSampleCount, stats)) {
-    Serial.println(F("INMP441 sanity check failed: no samples read"));
-    return false;
-  }
-
-  Serial.printf("INMP441 min=%ld max=%ld span=%ld level=%u%%\n",
-                static_cast<long>(stats.minimum),
-                static_cast<long>(stats.maximum),
-                static_cast<long>(stats.span),
-                stats.level);
-  return true;
-}
-
 void Inmp441Microphone::end() {
   if (!started_) {
     return;

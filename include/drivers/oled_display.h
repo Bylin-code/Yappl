@@ -12,9 +12,6 @@ class OledDisplay {
   bool begin();
   void clear();
   void drawMeter(uint8_t level);
-  void drawStatus(const __FlashStringHelper *line1, const __FlashStringHelper *line2);
-  void drawStatus(const char *line1, const char *line2);
-  void sanityCheck();
 
  private:
   void drawFrame();

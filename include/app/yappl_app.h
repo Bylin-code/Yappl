@@ -21,10 +21,6 @@ class YapplApp {
   uint32_t lastLogMs_ = 0;
   bool displayReady_ = false;
   bool micReady_ = false;
-
-#ifdef YAPPL_MIC_RAW_STREAM
-  void streamRawMicBlock();
-#endif
 };
 
 }  // namespace yappl

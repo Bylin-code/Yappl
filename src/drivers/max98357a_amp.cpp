@@ -1,6 +1,5 @@
 #include "drivers/max98357a_amp.h"
 
-#include <algorithm>
 #include <esp_idf_version.h>
 
 #include "app/config.h"
@@ -9,7 +8,6 @@ namespace yappl {
 namespace {
 
 constexpr i2s_port_t kAmpPort = I2S_NUM_1;
-constexpr int16_t kToneAmplitude = 9000;
 
 i2s_comm_format_t standardI2sFormat() {
 #if ESP_IDF_VERSION_MAJOR >= 4
@@ -75,39 +73,6 @@ size_t Max98357aAmp::write(const int16_t *samples, size_t sampleCount) {
   }
 
   return bytesWritten / sizeof(samples[0]);
-}
-
-bool Max98357aAmp::sanityCheck() {
-  if (!started_ || sampleRateHz_ == 0) {
-    return false;
-  }
-
-  // Short 440 Hz square wave. This is intentionally simple because the goal is
-  // only to prove BCLK/LRC/DIN/power/speaker wiring.
-  constexpr size_t kChunkSamples = 128;
-  constexpr uint32_t kToneHz = 440;
-  constexpr uint32_t kDurationMs = 350;
-  int16_t chunk[kChunkSamples] = {};
-
-  const uint32_t halfPeriodSamples = sampleRateHz_ / (kToneHz * 2);
-  const uint32_t totalSamples = sampleRateHz_ * kDurationMs / 1000;
-
-  for (uint32_t written = 0; written < totalSamples;) {
-    const size_t thisChunk = std::min<size_t>(kChunkSamples, totalSamples - written);
-    for (size_t i = 0; i < thisChunk; ++i) {
-      const bool high = ((written + i) / halfPeriodSamples) % 2 == 0;
-      chunk[i] = high ? kToneAmplitude : -kToneAmplitude;
-    }
-
-    if (write(chunk, thisChunk) != thisChunk) {
-      Serial.println(F("MAX98357A sanity check failed: I2S write error"));
-      return false;
-    }
-    written += thisChunk;
-  }
-
-  Serial.println(F("MAX98357A sanity tone finished"));
-  return true;
 }
 
 void Max98357aAmp::end() {

@@ -9,7 +9,6 @@ class Max98357aAmp {
  public:
   bool begin(uint32_t sampleRateHz);
   size_t write(const int16_t *samples, size_t sampleCount);
-  bool sanityCheck();
   void end();
 
  private:

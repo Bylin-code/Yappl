@@ -17,7 +17,6 @@ class Inmp441Microphone {
   bool begin(uint32_t sampleRateHz);
   size_t read(int32_t *samples, size_t sampleCount);
   bool readLevel(int32_t *scratch, size_t sampleCount, MicLevelStats &stats);
-  bool sanityCheck();
   void end();
 
  private:
