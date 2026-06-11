@@ -10,8 +10,8 @@ struct AppConfig {
   static constexpr uint32_t sampleRateHz = 16000;
   static constexpr size_t micSampleCount = 256;
 
-  static constexpr int noiseFloor = 1000;
-  static constexpr int noiseCeiling = 120000;
+  static constexpr int noiseFloor = 0;
+  static constexpr int noiseCeiling = 100000;
 
   static constexpr uint8_t oledAddress = 0x3C;
   static constexpr int oledSclPin = 11;

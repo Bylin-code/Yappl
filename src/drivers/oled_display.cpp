@@ -66,7 +66,10 @@ void OledDisplay::drawMeter(uint8_t level) {
     level = 100;
   }
 
-  const uint8_t fillWidth = static_cast<uint8_t>((kMeterWidth - 4) * level / 100);
+  uint8_t fillWidth = static_cast<uint8_t>((kMeterWidth - 4) * level / 100);
+  if (level > 0 && fillWidth < 4) {
+    fillWidth = 4;
+  }
 
   g_oled.clearBuffer();
   drawFrame();

@@ -11,6 +11,7 @@ namespace yappl {
 namespace {
 
 constexpr i2s_port_t kMicPort = I2S_NUM_0;
+constexpr uint8_t kInmp441SlotShift = 8;
 
 i2s_comm_format_t standardI2sFormat() {
 #if ESP_IDF_VERSION_MAJOR >= 4
@@ -86,23 +87,30 @@ bool Inmp441Microphone::readLevel(int32_t *scratch, size_t sampleCount, MicLevel
 
   int32_t minimum = std::numeric_limits<int32_t>::max();
   int32_t maximum = std::numeric_limits<int32_t>::min();
+  int32_t peakVolume = 0;
 
   for (size_t i = 0; i < samplesRead; ++i) {
-    // INMP441 places 24-bit signed data in a 32-bit slot. For a responsive
-    // visual meter the raw span is enough; no PCM conversion is needed here.
-    minimum = std::min(minimum, scratch[i]);
-    maximum = std::max(maximum, scratch[i]);
+    // INMP441 places 24-bit signed audio in a 32-bit I2S slot. Shift into the
+    // normal signed 24-bit range so a full-scale peak is about +/-8388607.
+    const int32_t sample = scratch[i] >> kInmp441SlotShift;
+    const int32_t volume = sample < 0 ? -sample : sample;
+
+    minimum = std::min(minimum, sample);
+    maximum = std::max(maximum, sample);
+    peakVolume = std::max(peakVolume, volume);
   }
 
-  int64_t span = static_cast<int64_t>(maximum) - static_cast<int64_t>(minimum);
-  span -= AppConfig::noiseFloor;
-  span = std::max<int64_t>(0, span);
-  span = std::min<int64_t>(AppConfig::noiseCeiling, span);
+  int64_t meterValue = static_cast<int64_t>(peakVolume) - AppConfig::noiseFloor;
+  meterValue = std::max<int64_t>(0, meterValue);
+  meterValue = std::min<int64_t>(AppConfig::noiseCeiling, meterValue);
 
   stats.minimum = minimum;
   stats.maximum = maximum;
-  stats.span = static_cast<int32_t>(span);
-  stats.level = static_cast<uint8_t>(span * 100 / AppConfig::noiseCeiling);
+  stats.span = static_cast<int32_t>(meterValue);
+  stats.level = static_cast<uint8_t>(meterValue * 100 / AppConfig::noiseCeiling);
+  if (meterValue > 0 && stats.level == 0) {
+    stats.level = 1;
+  }
   return true;
 }
 

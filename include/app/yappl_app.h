@@ -18,6 +18,7 @@ class YapplApp {
   Max98357aAmp amp_;
   int32_t micSamples_[256] = {};
   uint32_t lastFrameMs_ = 0;
+  uint32_t lastLogMs_ = 0;
   bool displayReady_ = false;
   bool micReady_ = false;
 

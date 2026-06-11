@@ -14,9 +14,11 @@ PORT="${1:-}"
 cd "$PROJECT_DIR"
 
 if [ -n "$PORT" ]; then
+  echo "Uploading mic-raw-stream debug firmware. OLED meter will not run in this mode."
   "$PIO" run -e mic-raw-stream --target upload --upload-port "$PORT"
   "$PIO" device monitor --port "$PORT" --baud 921600
 else
+  echo "Uploading mic-raw-stream debug firmware. OLED meter will not run in this mode."
   "$PIO" run -e mic-raw-stream --target upload
   "$PIO" device monitor --baud 921600
 fi

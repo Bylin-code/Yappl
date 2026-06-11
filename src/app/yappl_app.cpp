@@ -25,12 +25,15 @@ void YapplApp::begin() {
 
   displayReady_ = display_.begin();
   if (displayReady_) {
-    display_.sanityCheck();
-    delay(700);
+    display_.drawStatus(F("Yappl"), F("Starting mic..."));
   }
 
   micReady_ = mic_.begin(AppConfig::sampleRateHz);
   Serial.println(micReady_ ? F("INMP441 ready") : F("INMP441 failed"));
+
+  if (displayReady_) {
+    display_.drawStatus(F("Yappl"), F("Starting amp..."));
+  }
 
   // Initialize the amp so app code can play audio later. The main loop does
   // not route mic audio to the speaker yet; call amp_.sanityCheck() here only
@@ -45,6 +48,9 @@ void YapplApp::begin() {
       display_.drawStatus(F("Mic error"), F("Check INMP441"));
     }
     delay(600);
+    if (micReady_) {
+      display_.drawMeter(0);
+    }
   }
 
   if (micReady_) {
@@ -71,7 +77,19 @@ void YapplApp::update() {
   MicLevelStats stats;
   if (!mic_.readLevel(micSamples_, AppConfig::micSampleCount, stats)) {
     Serial.println(F("Mic read failed"));
+    if (displayReady_) {
+      display_.drawStatus(F("Mic read failed"), F("Check wiring"));
+    }
     return;
+  }
+
+  if (nowMs - lastLogMs_ >= 500) {
+    lastLogMs_ = nowMs;
+    Serial.printf("OLED meter: min=%ld max=%ld volume=%ld level=%u%%\n",
+                  static_cast<long>(stats.minimum),
+                  static_cast<long>(stats.maximum),
+                  static_cast<long>(stats.span),
+                  stats.level);
   }
 
   if (displayReady_) {
