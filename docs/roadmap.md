@@ -4,13 +4,12 @@ This is the recommended step-by-step path for building Yappl from the current pr
 
 ## 1. Stabilize the Current Hardware
 
-Get the current ESP32-S3, OLED, INMP441 mic, and MAX98357A amp working reliably.
+Get the current ESP32-S3, OLED, and INMP441 mic working reliably.
 
 Focus on:
 
 - OLED meter draws correctly.
 - Mic readings respond to speech.
-- Speaker can play a simple sound.
 - Firmware uploads and serial monitor are reliable.
 
 Do not add Wi-Fi or backend work until the basic hardware loop is stable.
@@ -194,7 +193,6 @@ Polish the bedside experience:
 - Better idle screen.
 - Better recording screen.
 - Better reminder animation.
-- Better sound cues.
 - Better error states.
 
 The device should feel calm and intentional.
@@ -210,7 +208,6 @@ device records
 backend receives live audio/transcript chunks
 backend decides when a question is useful
 device receives question
-speaker makes gentle pop
 OLED displays question
 ```
 
@@ -236,7 +233,6 @@ After the interaction works:
 - Mount button cleanly.
 - Mount OLED cleanly.
 - Tune LED brightness.
-- Tune speaker volume.
 - Make wiring robust.
 - Add strain relief and power stability.
 

@@ -12,7 +12,7 @@ The first version is for personal use. The long-term hope is to turn it into a p
 
 Yappl should feel like a playful journalist companion.
 
-It should not talk over the user. Instead, it can make small audio cues and show text on the OLED to ask questions, answer questions, and guide the session without interrupting the user's train of thought.
+It should not talk over the user. Instead, it should show text on the OLED to ask questions, answer questions, and guide the session without interrupting the user's train of thought.
 
 The device will have a name and personality. It can be funny, but should remain useful and context-aware.
 
@@ -49,7 +49,7 @@ During a session, Yappl should:
 - Detect when the user is asking Yappl a question and answer on the screen.
 - Avoid interrupting the user verbally.
 
-When Yappl has something to show, it can make a gentle pop sound and display the question or answer on the OLED.
+When Yappl has something to show, it should display the question or answer on the OLED.
 
 It can ask multiple follow-up questions per night, but only when the context justifies it.
 
@@ -60,14 +60,12 @@ Current hardware:
 - ESP32-S3.
 - 128x128 SH1107 OLED.
 - INMP441 I2S microphone.
-- MAX98357A I2S amplifier and speaker.
 
 Planned or desired hardware:
 
 - One large user-facing button.
 - Hidden on/off switch.
 - Status LED or breathing light.
-- Speaker for sounds, cues, and possibly music.
 
 The current 128x128 OLED is enough for now.
 

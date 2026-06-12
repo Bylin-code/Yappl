@@ -12,6 +12,11 @@ class OledDisplay {
   bool begin();
   void clear();
   void drawMeter(uint8_t level);
+  void drawHardwareStatus(bool buttonPressed,
+                          int lightRaw,
+                          uint8_t lightLevel,
+                          uint8_t micLevel,
+                          uint8_t ledBrightness);
 
  private:
   void drawFrame();

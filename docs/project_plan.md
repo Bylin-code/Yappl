@@ -29,7 +29,6 @@ Yappl/
         led.h
         oled_display.h
         inmp441_microphone.h
-        max98357a_amp.h
       services/
         audio_recorder.h
         network_manager.h
@@ -37,7 +36,6 @@ Yappl/
         reminder_scheduler.h
         journal_session.h
         ui_controller.h
-        sound_player.h
       util/
         ring_buffer.h
         time_utils.h
@@ -53,7 +51,6 @@ Yappl/
         led.cpp
         oled_display.cpp
         inmp441_microphone.cpp
-        max98357a_amp.cpp
       services/
         audio_recorder.cpp
         network_manager.cpp
@@ -61,7 +58,6 @@ Yappl/
         reminder_scheduler.cpp
         journal_session.cpp
         ui_controller.cpp
-        sound_player.cpp
       util/
         time_utils.cpp
         logging.cpp
@@ -120,9 +116,6 @@ Yappl/
     analyze_audio_samples.py
 
   tools/
-    audio/
-      generate_test_tone.py
-      inspect_pcm.py
     manufacturing/
       flash_device.sh
       device_self_test.md
@@ -168,7 +161,6 @@ Expected drivers:
 
 - OLED display.
 - INMP441 microphone.
-- MAX98357A speaker amp.
 - Button.
 - LED or breathing light.
 
@@ -186,7 +178,6 @@ Expected services:
 - `reminder_scheduler`: decides when the device should remind the user.
 - `journal_session`: owns start/stop/upload/session lifecycle.
 - `ui_controller`: decides what text or visuals appear on the OLED.
-- `sound_player`: plays non-speech sounds through the speaker.
 
 ### `util/`
 
