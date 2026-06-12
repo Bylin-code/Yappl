@@ -8,10 +8,10 @@
 namespace yappl {
 namespace {
 
-// HiLetgo's 1.5 inch 128x128 OLED uses an SH1107 controller. Use U8g2's
-// generic 128x128 SH1107 mapping, not the Seeed-specific mapping, because the
-// Seeed variant uses a different column offset and can make the image wrap.
-U8G2_SH1107_128X128_F_HW_I2C g_oled(U8G2_R0, U8X8_PIN_NONE);
+// HiLetgo's 1.5 inch 128x128 OLED uses an SH1107 controller. This panel maps
+// correctly with U8g2's zero-offset Seeed 128x128 variant; the generic SH1107
+// constructor applies a 96-column offset and causes quarter-screen wraparound.
+U8G2_SH1107_SEEED_128X128_F_HW_I2C g_oled(U8G2_R0, U8X8_PIN_NONE);
 
 constexpr uint8_t kDisplayWidth = 128;
 constexpr uint8_t kDisplayHeight = 128;
