@@ -19,13 +19,64 @@ constexpr uint8_t kMeterX = 10;
 constexpr uint8_t kMeterY = 76;
 constexpr uint8_t kMeterWidth = 108;
 constexpr uint8_t kMeterHeight = 18;
-constexpr uint8_t kBarX = 10;
-constexpr uint8_t kBarWidth = 108;
-constexpr uint8_t kBarHeight = 12;
+constexpr uint8_t kLabelX = 10;
+constexpr uint8_t kPercentX = 38;
+constexpr uint8_t kBarX = 66;
+constexpr uint8_t kBarWidth = 52;
+constexpr uint8_t kBarHeight = 9;
+constexpr uint8_t kRowLightY = 62;
+constexpr uint8_t kRowMicY = 82;
+constexpr uint8_t kRowLedY = 102;
+
+const char *noteName(uint16_t frequencyHz) {
+  if (frequencyHz == 0) {
+    return "--";
+  }
+
+  switch (frequencyHz) {
+    case 262:
+      return "C4";
+    case 294:
+      return "D4";
+    case 330:
+      return "E4";
+    case 349:
+      return "F4";
+    case 392:
+      return "G4";
+    case 440:
+      return "A4";
+    case 494:
+      return "B4";
+    case 523:
+      return "C5";
+    default:
+      return "??";
+  }
+}
+
+void drawValueBar(uint8_t y, const char *label, uint8_t percent) {
+  if (percent > 100) {
+    percent = 100;
+  }
+
+  const uint8_t fillWidth = static_cast<uint8_t>((kBarWidth - 4) * percent / 100);
+  char percentText[6] = {};
+
+  g_oled.drawStr(kLabelX, y, label);
+  snprintf(percentText, sizeof(percentText), "%3u%%", percent);
+  g_oled.drawStr(kPercentX, y, percentText);
+  g_oled.drawFrame(kBarX, y - 8, kBarWidth, kBarHeight);
+  if (fillWidth > 0) {
+    g_oled.drawBox(kBarX + 2, y - 6, fillWidth, kBarHeight - 4);
+  }
+}
 
 }  // namespace
 
 bool OledDisplay::begin() {
+  // I2C uses explicit pins because the ESP32-S3 board's defaults are not the
+  // pins used by this wiring.
   Wire.begin(AppConfig::oledSdaPin, AppConfig::oledSclPin);
   Wire.setClock(400000);
 
@@ -38,6 +89,7 @@ bool OledDisplay::begin() {
 }
 
 void OledDisplay::clear() {
+  // Full-buffer U8g2 mode: draw into RAM first, then send to the display.
   g_oled.clearBuffer();
   g_oled.sendBuffer();
 }
@@ -76,53 +128,30 @@ void OledDisplay::drawHardwareStatus(bool buttonPressed,
                                      int lightRaw,
                                      uint8_t lightLevel,
                                      uint8_t micLevel,
-                                     uint8_t ledBrightness) {
-  if (lightLevel > 100) {
-    lightLevel = 100;
-  }
-  if (micLevel > 100) {
-    micLevel = 100;
-  }
-
-  const uint8_t lightFill = static_cast<uint8_t>((kBarWidth - 4) * lightLevel / 100);
-  const uint8_t micFill = static_cast<uint8_t>((kBarWidth - 4) * micLevel / 100);
+                                     uint8_t ledBrightness,
+                                     uint16_t piezoFrequencyHz) {
+  (void)lightRaw;
   const uint8_t ledLevel = static_cast<uint8_t>(ledBrightness * 100 / 255);
-  const uint8_t ledFill = static_cast<uint8_t>((kBarWidth - 4) * ledLevel / 100);
 
+  // Keep labels short because this is a 128x128 display.
   char line[24] = {};
 
   g_oled.clearBuffer();
   g_oled.drawFrame(0, 0, kDisplayWidth, kDisplayHeight);
+
   g_oled.setFont(u8g2_font_7x13B_tr);
-  g_oled.drawStr(10, 18, "Yappl IO");
+  g_oled.drawStr(10, 16, "Yappl");
 
   g_oled.setFont(u8g2_font_6x12_tr);
-  snprintf(line, sizeof(line), "Button: %s", buttonPressed ? "PRESSED" : "open");
+  snprintf(line, sizeof(line), "Button: %s", buttonPressed ? "DOWN" : "UP");
   g_oled.drawStr(10, 34, line);
 
-  snprintf(line, sizeof(line), "Light: %4d %3u%%", lightRaw, lightLevel);
-  g_oled.drawStr(10, 50, line);
-  g_oled.drawFrame(kBarX, 55, kBarWidth, kBarHeight);
-  if (lightFill > 0) {
-    g_oled.drawBox(kBarX + 2, 57, lightFill, kBarHeight - 4);
-  }
+  snprintf(line, sizeof(line), "Piezo: %s", noteName(piezoFrequencyHz));
+  g_oled.drawStr(10, 48, line);
 
-  snprintf(line, sizeof(line), "Mic:          %3u%%", micLevel);
-  g_oled.drawStr(10, 78, line);
-  g_oled.drawFrame(kBarX, 83, kBarWidth, kBarHeight);
-  if (micFill > 0) {
-    g_oled.drawBox(kBarX + 2, 85, micFill, kBarHeight - 4);
-  }
-
-  snprintf(line, sizeof(line), "LED:%3u%%", ledLevel);
-  g_oled.drawStr(10, 106, line);
-  g_oled.drawFrame(58, 98, 60, kBarHeight);
-  if (ledFill > 0) {
-    const uint8_t compactFill = static_cast<uint8_t>((60 - 4) * ledLevel / 100);
-    g_oled.drawBox(60, 100, compactFill, kBarHeight - 4);
-  }
-
-  g_oled.drawStr(10, 122, buttonPressed ? "Piezo: scale" : "Piezo: off");
+  drawValueBar(kRowLightY, "Light", lightLevel);
+  drawValueBar(kRowMicY, "Mic", micLevel);
+  drawValueBar(kRowLedY, "LED", ledLevel);
   g_oled.sendBuffer();
 }
 

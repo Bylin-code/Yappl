@@ -13,6 +13,8 @@ namespace {
 constexpr i2s_port_t kMicPort = I2S_NUM_0;
 constexpr uint8_t kInmp441SlotShift = 8;
 
+// Arduino-ESP32 can be built against different ESP-IDF versions. Hide the I2S
+// format enum difference here so the rest of the driver stays stable.
 i2s_comm_format_t standardI2sFormat() {
 #if ESP_IDF_VERSION_MAJOR >= 4
   return I2S_COMM_FORMAT_STAND_I2S;
@@ -28,6 +30,8 @@ bool Inmp441Microphone::begin(uint32_t sampleRateHz) {
     return true;
   }
 
+  // INMP441 is a receive-only I2S device. LR is wired low in this project, so
+  // the mic data is on the left channel.
   i2s_config_t config = {};
   config.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX);
   config.sample_rate = sampleRateHz;
@@ -69,6 +73,8 @@ size_t Inmp441Microphone::read(int32_t *samples, size_t sampleCount) {
     return 0;
   }
 
+  // i2s_read may block while waiting for enough DMA samples. Keep mic reads out
+  // of timing-sensitive tasks.
   size_t bytesRead = 0;
   const size_t bytesRequested = sampleCount * sizeof(samples[0]);
   const esp_err_t result = i2s_read(kMicPort, samples, bytesRequested, &bytesRead, pdMS_TO_TICKS(100));
@@ -100,6 +106,8 @@ bool Inmp441Microphone::readLevel(int32_t *scratch, size_t sampleCount, MicLevel
     peakVolume = std::max(peakVolume, volume);
   }
 
+  // The meter uses peak magnitude, not calibrated SPL/VU behavior. It is meant
+  // to be visually responsive during bring-up.
   int64_t meterValue = static_cast<int64_t>(peakVolume) - AppConfig::noiseFloor;
   meterValue = std::max<int64_t>(0, meterValue);
   meterValue = std::min<int64_t>(AppConfig::noiseCeiling, meterValue);

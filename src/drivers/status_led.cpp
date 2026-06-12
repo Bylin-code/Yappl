@@ -6,6 +6,7 @@ namespace yappl {
 
 bool StatusLed::begin() {
   pinMode(AppConfig::ledPin, OUTPUT);
+  // Start dark so boot does not leave the LED in an unknown state.
   set(false);
   started_ = true;
   return true;
@@ -24,6 +25,7 @@ void StatusLed::setBrightness(uint8_t brightness) {
     return;
   }
 
+  // Arduino's ESP32 analogWrite uses LEDC PWM under the hood.
   analogWrite(AppConfig::ledPin, brightness);
 }
 

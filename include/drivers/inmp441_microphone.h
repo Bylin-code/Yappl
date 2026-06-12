@@ -5,6 +5,7 @@
 
 namespace yappl {
 
+// Summary produced from one block of mic samples for the OLED meter and logs.
 struct MicLevelStats {
   int32_t minimum = 0;
   int32_t maximum = 0;
@@ -12,6 +13,8 @@ struct MicLevelStats {
   uint8_t level = 0;
 };
 
+// INMP441 I2S microphone driver. It returns raw 32-bit I2S slots and also
+// exposes a simple peak level helper for the current UI.
 class Inmp441Microphone {
  public:
   bool begin(uint32_t sampleRateHz);

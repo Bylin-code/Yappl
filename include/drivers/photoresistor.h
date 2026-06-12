@@ -4,6 +4,8 @@
 
 namespace yappl {
 
+// Reads the raw ADC value from the photoresistor voltage divider. Conversion to
+// a normalized light percentage happens in the app layer.
 class Photoresistor {
  public:
   bool begin();

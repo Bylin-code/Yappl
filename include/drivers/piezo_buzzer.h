@@ -4,6 +4,8 @@
 
 namespace yappl {
 
+// Passive piezo driver using Arduino tone(). Volume is handled electrically for
+// now, not in software.
 class PiezoBuzzer {
  public:
   bool begin();

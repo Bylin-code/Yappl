@@ -6,6 +6,7 @@ namespace yappl {
 
 bool PiezoBuzzer::begin() {
   pinMode(AppConfig::piezoPin, OUTPUT);
+  // Ensure the piezo is quiet after boot and after reflashing.
   stop();
   started_ = true;
   return true;
@@ -16,6 +17,8 @@ void PiezoBuzzer::play(uint16_t frequencyHz) {
     return;
   }
 
+  // tone() owns the timer output until noTone() is called or the frequency is
+  // changed by another tone() call.
   tone(AppConfig::piezoPin, frequencyHz);
 }
 
