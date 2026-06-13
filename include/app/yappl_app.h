@@ -12,8 +12,7 @@
 #include "drivers/photoresistor.h"
 #include "drivers/piezo_buzzer.h"
 #include "drivers/status_led.h"
-#include "services/led_breather.h"
-#include "services/piezo_scale_player.h"
+#include "services/act_player.h"
 
 namespace yappl {
 
@@ -34,13 +33,15 @@ class YapplApp {
   Photoresistor photoresistor_;
   Button button_;
 
-  // Behavior services used by the output task.
-  LedBreather ledBreather_{led_};
-  PiezoScalePlayer scalePlayer_{piezo_};
+  // Behavior service used by the display task.
+  ActPlayer actPlayer_;
 
   // Scratch buffer for mic reads. Kept as a member so it does not consume task
   // stack every time the sensor task runs.
   int32_t micSamples_[256] = {};
+  int32_t *recordingBuffer_ = nullptr;
+  size_t recordingCapacitySamples_ = 0;
+  size_t recordedSamples_ = 0;
 
   // Shared state and RTOS handles.
   AppState state_;
@@ -51,15 +52,38 @@ class YapplApp {
   bool displayReady_ = false;
   bool micReady_ = false;
   bool tasksStarted_ = false;
+  bool sessionCompletedThisBoot_ = false;
+  bool previousButtonPressed_ = false;
+  bool activationButtonReleased_ = false;
+  uint32_t buttonPressedAtMs_ = 0;
+  uint32_t modeStartedAtMs_ = 0;
+  AppMode mode_ = AppMode::IdleDay;
+  uint8_t lastLedBrightness_ = 0;
+  uint16_t currentPiezoFrequencyHz_ = 0;
+  uint8_t melodyIndex_ = 0;
+  uint32_t lastMelodyNoteMs_ = 0;
 
   uint8_t lightLevelFromRaw(int raw) const;
   bool startTasks();
+  bool isNightTime() const;
+  bool hasYappedRecently() const;
+  AppMode restingMode() const;
+  void enterMode(AppMode mode, uint32_t nowMs);
+  void updateMode(uint32_t nowMs, const AppState &snapshot);
+  uint8_t ledBrightnessFor(uint32_t nowMs, const AppState &snapshot) const;
+  uint16_t piezoFrequencyFor(uint32_t nowMs);
+  void setLedBrightness(uint8_t brightness);
+  void setPiezoFrequency(uint16_t frequencyHz);
+  void allocateRecordingBuffer();
+  void resetRecording();
+  void appendRecordingSamples(const int32_t *samples, size_t sampleCount);
+  uint8_t micLevelFromSamples(const int32_t *samples, size_t sampleCount) const;
 
   // State helpers always take/release the mutex internally. Callers should copy
   // state quickly and then do slow hardware work outside the lock.
   AppState stateSnapshot();
   void publishSensorState(bool buttonPressed, int lightRaw, uint8_t lightLevel, uint8_t micLevel);
-  void publishOutputState(uint8_t ledBrightness, uint16_t piezoFrequencyHz);
+  void publishOutputState(AppMode mode, uint8_t ledBrightness, uint16_t piezoFrequencyHz, size_t recordedBytes);
 
   // RTOS task bodies.
   void outputTask();

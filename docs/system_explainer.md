@@ -135,8 +135,9 @@ This task needs to be smooth, so it has the highest priority of the Yappl tasks.
 It owns these behavior services:
 
 ```text
-LedBreather
-PiezoScalePlayer
+state transitions
+LED patterns
+piezo melodies
 ```
 
 The output task reads:
@@ -280,13 +281,10 @@ Services contain behavior.
 Current services:
 
 ```text
-LedBreather
-PiezoScalePlayer
+ActPlayer
 ```
 
-`LedBreather` knows how to create a smooth breathing brightness value.
-
-`PiezoScalePlayer` knows how to play a scale with steady note timing.
+`ActPlayer` knows which OLED face animation should play for the current app mode.
 
 Services use drivers, but they still should not own the whole product.
 
@@ -446,7 +444,6 @@ outputTaskPeriodMs = 5;
 sensorTaskPeriodMs = 50;
 displayTaskPeriodMs = 100;
 serialLogMs = 500;
-piezoNoteDurationMs = 180;
 ```
 
 Meaning:
@@ -726,4 +723,3 @@ Main loop
 This structure keeps the slow OLED from ruining the timing of the LED and
 piezo, while keeping the code organized enough to grow into the final Yappl
 device.
-

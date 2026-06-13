@@ -38,19 +38,40 @@ struct AppConfig {
   static constexpr bool enableButton = true;
   static constexpr bool enableSerialLog = true;
 
+  // Temporary clock placeholders. These are intentionally hardcoded until
+  // Wi-Fi/time sync exists; change them before flashing to test different
+  // product states.
+  static constexpr uint8_t stubCurrentHour = 10;
+  static constexpr uint8_t stubCurrentMinute = 30;
+  static constexpr uint8_t stubLastYapAgeHours = 20;
+
   // Tune these after logging real readings from the installed light sensor.
   // With the suggested divider, brighter light should produce a higher value.
   static constexpr int photoresistorDarkRaw = 0;
   static constexpr int photoresistorBrightRaw = 4095;
+  static constexpr uint8_t roomLightOffBelowPercent = 15;
 
   // RTOS periods. Output is intentionally fastest so OLED I2C transfers do not
   // cause visible LED or piezo timing jitter.
-  static constexpr uint32_t ledFadePeriodMs = 2000;
   static constexpr uint32_t outputTaskPeriodMs = 5;
   static constexpr uint32_t sensorTaskPeriodMs = 50;
-  static constexpr uint32_t displayTaskPeriodMs = 100;
+  static constexpr uint32_t displayTaskPeriodMs = 200;
   static constexpr uint32_t serialLogMs = 500;
-  static constexpr uint32_t piezoNoteDurationMs = 500;
+
+  static constexpr uint32_t notYetDurationMs = 1400;
+  static constexpr uint32_t activationDurationMs = 700;
+  static constexpr uint32_t deactivationDurationMs = 3200;
+  static constexpr uint32_t reminderHoldToActivateMs = 500;
+  static constexpr uint32_t listeningHoldToDeactivateMs = 1000;
+
+  static constexpr uint8_t reminderLedMaxBrightness = 128;
+  static constexpr uint8_t listeningLedBrightness = 128;
+  static constexpr uint32_t reminderLightOnBreathMs = 3000;
+  static constexpr uint32_t reminderDarkBreathMs = 1000;
+  static constexpr uint32_t reminderDarkOffMs = 500;
+  static constexpr uint32_t reminderDarkFlashMs = 90;
+
+  static constexpr size_t recordingBufferBytes = 256 * 1024;
 
   // FreeRTOS stack sizes and priorities. Larger priority number wins.
   static constexpr uint32_t outputTaskStackBytes = 3072;
@@ -60,11 +81,8 @@ struct AppConfig {
   static constexpr UBaseType_t sensorTaskPriority = 2;
   static constexpr UBaseType_t displayTaskPriority = 1;
 
-  // Reserved for a future custom PWM piezo driver. The current driver uses
-  // Arduino tone(), so electrical damping controls loudness for now.
-  static constexpr uint8_t piezoVolume = 255;
-  static constexpr uint8_t piezoPwmChannel = 0;
-  static constexpr uint8_t piezoPwmResolutionBits = 8;
+  // Piezo is driven through Arduino tone(); volume is handled electrically.
+  static constexpr uint16_t piezoSilentHz = 0;
 };
 
 }  // namespace yappl

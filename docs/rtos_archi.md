@@ -120,8 +120,9 @@ every 5 ms
 
 Owns:
 
-- `LedBreather`
-- `PiezoScalePlayer`
+- app state transitions
+- LED state patterns
+- piezo state melodies
 
 Reads:
 
@@ -306,7 +307,7 @@ Bad:
 
 ```cpp
 xSemaphoreTake(stateMutex, portMAX_DELAY);
-display.drawHardwareStatus(...);  // slow OLED I2C write
+display.drawFaceFrame(...);  // slow OLED I2C write
 xSemaphoreGive(stateMutex);
 ```
 
@@ -317,7 +318,7 @@ xSemaphoreTake(stateMutex, portMAX_DELAY);
 snapshot = appState;
 xSemaphoreGive(stateMutex);
 
-display.drawHardwareStatus(...);  // slow, but state is unlocked
+display.drawFaceFrame(...);  // slow, but state is unlocked
 ```
 
 This lets other tasks keep updating state while the OLED is busy.
@@ -441,8 +442,7 @@ include/
     output_task.h
     sensor_task.h
     display_task.h
-    led_breather.h
-    piezo_scale_player.h
+    act_player.h
 
 src/
   app/
@@ -453,8 +453,7 @@ src/
     output_task.cpp
     sensor_task.cpp
     display_task.cpp
-    led_breather.cpp
-    piezo_scale_player.cpp
+    act_player.cpp
 ```
 
 Drivers stay as hardware wrappers:
@@ -495,8 +494,9 @@ This should be the first RTOS task because it fixes the visible problem.
 The output task:
 
 - Reads `buttonPressed`.
-- Updates `LedBreather`.
-- Updates `PiezoScalePlayer`.
+- Updates the app mode.
+- Updates LED state patterns.
+- Updates piezo state melodies.
 - Writes `ledBrightness` and `piezoFrequencyHz`.
 - Runs every 5 ms.
 

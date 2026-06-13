@@ -5,7 +5,7 @@
 namespace yappl {
 
 // Low-level status LED driver. It exposes direct on/off and raw 8-bit PWM
-// brightness; animation patterns belong in services such as LedBreather.
+// brightness; state-specific animation patterns live above the driver.
 class StatusLed {
  public:
   bool begin();

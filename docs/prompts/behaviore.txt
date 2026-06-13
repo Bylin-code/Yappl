@@ -1,0 +1,54 @@
+Ok get rid of all current app behavior with the oled, and then do this:
+
+- Make a folder where I can store bitmaps I made for different states screens
+- Draw a filler character that will be a placeholder. This character is just a pair of eyes that looks around and reacts with different emotions, as if the screen is the face of this little device. Make sure the eye are big and look animated and fun.
+- So eventually I want this thing to read the actual time from an online api. Right now we don’t have wifi so find somewhere as a placeholder where I can enter a certain time into the code hardcoded before flashing the firmware so I can look at different behaviors at different times, this time will not change with time, its just a reference for now. 
+- Also add a timestamp for the last time the user has yapped. This is also hardcoded for now. 
+
+The hierarchy is split into two, states and acts
+- States are triggered by user interactions and internal clock and encapsulates many actions
+- States have consistent behavior from led and piezo, so those two things are state triggered
+- Acts are used to trigger oled behaviors. Acts are basically loops of the OLED, and are encapsulated within states, each state usually have a default act that plays the oled loop when no other act is called. Occasionally, usually randomly, different actions would be called during a state to offer variety. 
+- For example, the default act for idle would just be two eyes looking straight, and other acts such as blinking or looking left and right would occasionally be called to override the default act. Acts could also be longer to be more playful, like a 7 second cut scene of the eyes slowly falling asleep and waking up. These acts will have a minimum downtime, a period where its impossible to call them, but then after that downtime, they have a random chance of being called every tick
+- Make it easy to add acts and configure their downtimes and random chance of occurrence easily
+- Some states only have the default act since they are so short
+
+States:
+- Idle Day
+    - User has yapped In the past 18 hours and the current time is after 8am and before 8pm
+    - LED is off
+    - Default act: eyes looking straight and not moving
+    - Act: blinking (has to animate the eyelids actually moving up and down)
+    - Act: looking left and right (takes longer than blinking)
+- Reminder
+    - User has not yapped in the past 18 hours
+        - If the light in the room is on, the LED breathes slowly from 0% to 50% to 0% pwm at a period of once every 3 seconds. 
+        - If the light is off, LED breathes 0% to 50% to 0% at once every 1 second, then off for 0.5 seconds, then flashes quickly three times, then off for 0.5 seconds, and this sequence repeats when light is off and the user hasn’t yapped.
+    - Default act: eyes anxiously looking left and right with eyelids drooped down and a sweat down the face
+    - Act: the face vibrates left and right, calls pretty often
+- Not yet
+    - User presses the button during idle 
+    - Default act: Eyes sway back and fourth, looking like its shaking its head
+    - State lasts very short, returns back to idle state after running
+- Activation
+    - User presses the button for over 0.5s while state is reminder to trigger this stage
+    - buzzer plays a happy tone
+    - Default act: Eyes are dancing with excitement
+    - Lasts pretty short, ends after the happy tone ends and activates the listening state
+
+- Listening 
+    - Occurs right after activation state
+    - Default act: eyes looking straight and not moving
+    - Act: blinking 
+    - Act: nodding (make the eyes go up and down in a way that looks like nodding)
+    - mic is recording what the user said in psram buffer
+    - LED is on constantly at 50% PWM
+
+- Deactivation
+    - Occurs after the user presses the button for more than 1s during the listening state
+    - Plays a downward trending melody as the eyes slowly fall asleep
+    - Eyes closes to dark and screen displays GOOD NIGHT! to flash three times.
+
+- Idle Night
+    - Occurs when the user has yapped in the past 18 hours and time is after 8pm before 8am
+    - The two eyes are sleeping with ZZZ popping out one by one
