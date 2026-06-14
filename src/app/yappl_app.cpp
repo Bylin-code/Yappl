@@ -1,12 +1,11 @@
 #include "app/yappl_app.h"
 
 #include <algorithm>
-#include <limits>
-#include <math.h>
 
 #include <esp_heap_caps.h>
 
 #include "app/config.h"
+#include "app/output_patterns.h"
 
 namespace yappl {
 namespace {
@@ -14,50 +13,6 @@ namespace {
 // INMP441 gives signed 24-bit audio inside a 32-bit I2S slot. Shifting right by
 // 8 converts the slot into the normal +/-8388607-ish sample range.
 constexpr uint8_t kInmp441SlotShift = 8;
-
-// Full turn in radians, used for sine/cosine animation curves.
-constexpr float kTwoPi = 6.28318530718f;
-
-// One-shot melodies for state transitions. The output task indexes these by
-// elapsed time, so no delay() is needed while notes play.
-constexpr uint16_t kActivationMelodyHz[] = {523, 659, 784, 1047};
-constexpr uint16_t kDeactivationMelodyHz[] = {523, 440, 392, 330, 262};
-constexpr uint32_t kActivationNoteMs = 140;
-constexpr uint32_t kDeactivationNoteMs = 360;
-
-// Return a smooth 0..maxBrightness breathing curve. This is used for reminder
-// LED behavior because cosine eases in/out better than a linear ramp.
-uint8_t cosineBreath(uint32_t elapsedMs, uint32_t periodMs, uint8_t maxBrightness) {
-  if (periodMs == 0) {
-    return maxBrightness;
-  }
-
-  // phase is 0..1 across one period. The cosine expression maps it to 0..1.
-  const float phase = static_cast<float>(elapsedMs % periodMs) / static_cast<float>(periodMs);
-  const float wave = (1.0f - cosf(phase * kTwoPi)) * 0.5f;
-  return static_cast<uint8_t>(wave * maxBrightness);
-}
-
-// Human-readable state name used only for serial debugging.
-const char *modeName(AppMode mode) {
-  switch (mode) {
-    case AppMode::IdleDay:
-      return "idle_day";
-    case AppMode::Reminder:
-      return "reminder";
-    case AppMode::NotYet:
-      return "not_yet";
-    case AppMode::Activation:
-      return "activation";
-    case AppMode::Listening:
-      return "listening";
-    case AppMode::Deactivation:
-      return "deactivation";
-    case AppMode::IdleNight:
-      return "idle_night";
-  }
-  return "unknown";
-}
 
 }  // namespace
 
@@ -100,16 +55,16 @@ void YapplApp::begin() {
 
   // Seed AppState with enough data for display/output tasks to start cleanly.
   const int lightRaw = AppConfig::enablePhotoresistor ? photoresistor_.readRaw() : 0;
-  mode_ = restingMode();
+  stateController_.begin(millis());
   publishSensorState(false, lightRaw, lightLevelFromRaw(lightRaw), 0);
-  publishOutputState(mode_, 0, 0, 0);
+  publishOutputState(stateController_.mode(), 0, 0, 0);
 
   Serial.println(micReady_ ? F("INMP441 ready") : F("INMP441 failed"));
   Serial.printf("Stub time %02u:%02u, last yap age %u hours, boot mode %s\n",
                 AppConfig::stubCurrentHour,
                 AppConfig::stubCurrentMinute,
                 AppConfig::stubLastYapAgeHours,
-                modeName(mode_));
+                StateController::modeName(stateController_.mode()));
 
   if (!startTasks()) {
     Serial.println(F("Failed to start RTOS tasks"));
@@ -171,212 +126,6 @@ bool YapplApp::startTasks() {
   // If any task fails to start, do not pretend the RTOS app is running.
   tasksStarted_ = outputStarted == pdPASS && sensorStarted == pdPASS && displayStarted == pdPASS;
   return tasksStarted_;
-}
-
-bool YapplApp::isNightTime() const {
-  // Night wraps across midnight: 20:00..23:59 or 00:00..07:59.
-  return AppConfig::stubCurrentHour >= 20 || AppConfig::stubCurrentHour < 8;
-}
-
-bool YapplApp::hasYappedRecently() const {
-  // A completed session during this boot counts immediately even though the
-  // hardcoded timestamp has not changed.
-  return sessionCompletedThisBoot_ || AppConfig::stubLastYapAgeHours < 18;
-}
-
-AppMode YapplApp::restingMode() const {
-  // Resting mode is what the device should be doing when no short transition
-  // state is active.
-  if (!hasYappedRecently()) {
-    return AppMode::Reminder;
-  }
-  return isNightTime() ? AppMode::IdleNight : AppMode::IdleDay;
-}
-
-void YapplApp::enterMode(AppMode mode, uint32_t nowMs) {
-  // Ignore redundant transitions so animations/timers do not restart every tick.
-  if (mode_ == mode) {
-    return;
-  }
-
-  mode_ = mode;
-  modeStartedAtMs_ = nowMs;
-
-  // Entering Listening starts a new capture buffer. Activation/Deactivation
-  // reset the release guard used to avoid immediately ending a fresh session.
-  if (mode_ == AppMode::Listening) {
-    resetRecording();
-    activationButtonReleased_ = false;
-  } else if (mode_ == AppMode::Deactivation) {
-    activationButtonReleased_ = false;
-  } else if (mode_ == AppMode::Activation) {
-    activationButtonReleased_ = false;
-  }
-
-  Serial.printf("Mode -> %s\n", modeName(mode_));
-}
-
-void YapplApp::updateMode(uint32_t nowMs, const AppState &snapshot) {
-  const bool pressed = snapshot.buttonPressed;
-  // pressedNow means "this tick is the first tick after the button went down."
-  const bool pressedNow = pressed && !previousButtonPressed_;
-  if (pressedNow) {
-    // Used for hold-duration checks in Reminder and Listening.
-    buttonPressedAtMs_ = nowMs;
-  }
-  if (!pressed) {
-    // Listening should not immediately see the button still held from
-    // Activation as a request to stop; it must be released first.
-    activationButtonReleased_ = true;
-  }
-
-  switch (mode_) {
-    case AppMode::IdleDay:
-    case AppMode::IdleNight:
-      if (pressedNow) {
-        // Pressing while idle is intentionally rejected for now.
-        enterMode(AppMode::NotYet, nowMs);
-      } else {
-        // If hardcoded time/yap settings imply a different resting mode, follow.
-        const AppMode rest = restingMode();
-        if (rest != mode_) {
-          enterMode(rest, nowMs);
-        }
-      }
-      break;
-
-    case AppMode::Reminder:
-      // Reminder requires a hold, not a tap, to activate listening.
-      if (pressed && nowMs - buttonPressedAtMs_ >= AppConfig::reminderHoldToActivateMs) {
-        enterMode(AppMode::Activation, nowMs);
-      }
-      break;
-
-    case AppMode::NotYet:
-      // NotYet is a short cutscene, then returns to whatever resting mode is
-      // correct for the current fake time/yap status.
-      if (nowMs - modeStartedAtMs_ >= AppConfig::notYetDurationMs) {
-        enterMode(restingMode(), nowMs);
-      }
-      break;
-
-    case AppMode::Activation:
-      // Activation ends after the happy tone/dance window.
-      if (nowMs - modeStartedAtMs_ >= AppConfig::activationDurationMs) {
-        enterMode(AppMode::Listening, nowMs);
-      }
-      break;
-
-    case AppMode::Listening:
-      // Ending a session requires release after activation, then a deliberate
-      // long hold while Listening.
-      if (activationButtonReleased_ && pressed &&
-          nowMs - buttonPressedAtMs_ >= AppConfig::listeningHoldToDeactivateMs) {
-        enterMode(AppMode::Deactivation, nowMs);
-      }
-      break;
-
-    case AppMode::Deactivation:
-      // After GOOD NIGHT, mark this boot as yapped and return to IdleDay/Night.
-      if (nowMs - modeStartedAtMs_ >= AppConfig::deactivationDurationMs) {
-        sessionCompletedThisBoot_ = true;
-        enterMode(restingMode(), nowMs);
-      }
-      break;
-  }
-
-  previousButtonPressed_ = pressed;
-}
-
-uint8_t YapplApp::ledBrightnessFor(uint32_t nowMs, const AppState &snapshot) const {
-  // All LED behavior is state-driven. The output task calls this frequently and
-  // then applies the returned PWM brightness.
-  const uint32_t elapsed = nowMs - modeStartedAtMs_;
-
-  switch (mode_) {
-    case AppMode::Reminder:
-      // If the room is lit, gently breathe so the reminder stays soft.
-      if (snapshot.lightLevel >= AppConfig::roomLightOffBelowPercent) {
-        return cosineBreath(elapsed, AppConfig::reminderLightOnBreathMs, AppConfig::reminderLedMaxBrightness);
-      }
-
-      {
-        // If the room is dark, use a more urgent repeating pattern:
-        // fast breath -> pause -> three quick flashes -> pause.
-        const uint32_t flashPairMs = AppConfig::reminderDarkFlashMs * 2;
-        const uint32_t cycleMs = AppConfig::reminderDarkBreathMs +
-                                 AppConfig::reminderDarkOffMs +
-                                 flashPairMs * 3 +
-                                 AppConfig::reminderDarkOffMs;
-        uint32_t position = elapsed % cycleMs;
-        if (position < AppConfig::reminderDarkBreathMs) {
-          return cosineBreath(position, AppConfig::reminderDarkBreathMs, AppConfig::reminderLedMaxBrightness);
-        }
-        position -= AppConfig::reminderDarkBreathMs;
-        if (position < AppConfig::reminderDarkOffMs) {
-          return 0;
-        }
-        position -= AppConfig::reminderDarkOffMs;
-        if (position < flashPairMs * 3) {
-          return (position % flashPairMs) < AppConfig::reminderDarkFlashMs
-                     ? AppConfig::reminderLedMaxBrightness
-                     : 0;
-        }
-      }
-      return 0;
-
-    case AppMode::Activation:
-      // A short excited pulse while the happy tone plays.
-      return cosineBreath(elapsed, 500, AppConfig::reminderLedMaxBrightness);
-
-    case AppMode::Listening:
-      // Listening is intentionally steady so the device feels attentive.
-      return AppConfig::listeningLedBrightness;
-
-    case AppMode::Deactivation:
-      // Fade out while the eyes go to sleep.
-      if (elapsed >= AppConfig::deactivationDurationMs) {
-        return 0;
-      }
-      return static_cast<uint8_t>(
-          AppConfig::listeningLedBrightness -
-          (static_cast<uint32_t>(AppConfig::listeningLedBrightness) * elapsed / AppConfig::deactivationDurationMs));
-
-    case AppMode::IdleDay:
-    case AppMode::IdleNight:
-    case AppMode::NotYet:
-      return 0;
-  }
-  return 0;
-}
-
-uint16_t YapplApp::piezoFrequencyFor(uint32_t nowMs) {
-  // Piezo behavior is also state-driven. Returning 0 means "be silent."
-  const uint32_t elapsed = nowMs - modeStartedAtMs_;
-  const uint16_t *melody = nullptr;
-  size_t noteCount = 0;
-  uint32_t noteMs = 0;
-
-  if (mode_ == AppMode::Activation) {
-    // Upward melody: energetic "ready to listen" cue.
-    melody = kActivationMelodyHz;
-    noteCount = sizeof(kActivationMelodyHz) / sizeof(kActivationMelodyHz[0]);
-    noteMs = kActivationNoteMs;
-  } else if (mode_ == AppMode::Deactivation) {
-    // Downward melody: winding down into GOOD NIGHT.
-    melody = kDeactivationMelodyHz;
-    noteCount = sizeof(kDeactivationMelodyHz) / sizeof(kDeactivationMelodyHz[0]);
-    noteMs = kDeactivationNoteMs;
-  } else {
-    return 0;
-  }
-
-  // Convert elapsed time into a note index without blocking.
-  const size_t index = elapsed / noteMs;
-  if (index >= noteCount) {
-    return 0;
-  }
-  return melody[index];
 }
 
 void YapplApp::setLedBrightness(uint8_t brightness) {
@@ -527,15 +276,25 @@ void YapplApp::outputTask() {
     // mutex while computing outputs.
     const AppState snapshot = stateSnapshot();
 
-    // Decide if the product state should change.
-    updateMode(nowMs, snapshot);
+    // Decide if the product state should change. YapplApp reacts only to the
+    // transition side effects it owns, such as clearing the recording buffer.
+    const bool modeChanged = stateController_.update(nowMs, snapshot);
+    const AppMode mode = stateController_.mode();
+    if (modeChanged) {
+      if (mode == AppMode::Listening) {
+        resetRecording();
+      }
+      Serial.printf("Mode -> %s\n", StateController::modeName(mode));
+    }
 
     // Convert the current state into desired hardware outputs.
-    const uint8_t ledBrightness = ledBrightnessFor(nowMs, snapshot);
-    const uint16_t piezoFrequencyHz = piezoFrequencyFor(nowMs);
+    const uint8_t ledBrightness =
+        OutputPatterns::ledBrightnessFor(mode, stateController_.modeStartedAtMs(), nowMs, snapshot);
+    const uint16_t piezoFrequencyHz =
+        OutputPatterns::piezoFrequencyFor(mode, stateController_.modeStartedAtMs(), nowMs);
     setLedBrightness(ledBrightness);
     setPiezoFrequency(piezoFrequencyHz);
-    publishOutputState(mode_, ledBrightness, piezoFrequencyHz, recordedSamples_ * sizeof(recordingBuffer_[0]));
+    publishOutputState(mode, ledBrightness, piezoFrequencyHz, recordedSamples_ * sizeof(int32_t));
 
     // Keep a steady task cadence even if one iteration runs a little late.
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(AppConfig::outputTaskPeriodMs));
@@ -575,7 +334,7 @@ void YapplApp::sensorTask() {
       lastLogMs = nowMs;
       const AppState snapshot = stateSnapshot();
       Serial.printf("mode=%s button=%s light=%u%% mic=%u%% led=%u piezo=%uHz rec=%u\n",
-                    modeName(snapshot.mode),
+                    StateController::modeName(snapshot.mode),
                     snapshot.buttonPressed ? "down" : "up",
                     snapshot.lightLevel,
                     snapshot.micLevel,

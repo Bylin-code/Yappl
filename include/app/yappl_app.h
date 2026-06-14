@@ -6,6 +6,7 @@
 #include <freertos/task.h>
 
 #include "app/app_state.h"
+#include "app/state_controller.h"
 #include "drivers/button.h"
 #include "drivers/inmp441_microphone.h"
 #include "drivers/oled_display.h"
@@ -35,6 +36,7 @@ class YapplApp {
 
   // Behavior service used by the display task.
   ActPlayer actPlayer_;
+  StateController stateController_;
 
   // Scratch buffer for mic reads. Kept as a member so it does not consume task
   // stack every time the sensor task runs.
@@ -52,31 +54,14 @@ class YapplApp {
   bool displayReady_ = false;
   bool micReady_ = false;
   bool tasksStarted_ = false;
-  bool sessionCompletedThisBoot_ = false;
-  bool previousButtonPressed_ = false;
-  bool activationButtonReleased_ = false;
-  uint32_t buttonPressedAtMs_ = 0;
-  uint32_t modeStartedAtMs_ = 0;
-  AppMode mode_ = AppMode::IdleDay;
   uint8_t lastLedBrightness_ = 0;
   uint16_t currentPiezoFrequencyHz_ = 0;
 
-  // Helpers for turning raw hardware/time inputs into product behavior.
+  // Helpers for turning raw hardware inputs into product values.
   uint8_t lightLevelFromRaw(int raw) const;
   bool startTasks();
-  bool isNightTime() const;
-  bool hasYappedRecently() const;
-  AppMode restingMode() const;
 
-  // State-machine helpers. enterMode() performs one-time transition work;
-  // updateMode() decides whether the current mode should change.
-  void enterMode(AppMode mode, uint32_t nowMs);
-  void updateMode(uint32_t nowMs, const AppState &snapshot);
-
-  // Output helpers. They compute desired hardware outputs from the current mode,
-  // then only touch the hardware when the value actually changes.
-  uint8_t ledBrightnessFor(uint32_t nowMs, const AppState &snapshot) const;
-  uint16_t piezoFrequencyFor(uint32_t nowMs);
+  // Output helpers only touch hardware when the value actually changes.
   void setLedBrightness(uint8_t brightness);
   void setPiezoFrequency(uint16_t frequencyHz);
 

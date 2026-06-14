@@ -30,6 +30,8 @@ MIN_DRAW_INTERVAL = 0.05
 
 @dataclasses.dataclass
 class SessionStats:
+    """Small state object that remembers useful values across the whole run."""
+
     samples_seen: int = 0
     session_min_volume: Optional[int] = None
     session_max_volume: int = 0
@@ -37,6 +39,7 @@ class SessionStats:
     latest_volume: int = 0
 
     def add_sample(self, sample: int) -> None:
+        """Record one signed sample and update the live/session statistics."""
         volume = abs(sample)
         self.samples_seen += 1
         self.latest_sample = sample
@@ -49,10 +52,12 @@ class SessionStats:
 
 
 def choose_port() -> Optional[str]:
+    """Pick a likely ESP32 serial port when the user does not pass one in."""
     ports = list(list_ports.comports())
     if not ports:
         return None
 
+    # macOS ESP32 boards usually appear as usbmodem or usbserial devices.
     preferred = [
         port.device
         for port in ports
@@ -64,6 +69,7 @@ def choose_port() -> Optional[str]:
 
 
 def parse_sample(line: bytes) -> Optional[int]:
+    """Extract the shifted 24-bit mic sample from one CSV line of firmware output."""
     try:
         text = line.decode("utf-8", errors="replace").strip()
     except UnicodeDecodeError:
@@ -80,6 +86,7 @@ def parse_sample(line: bytes) -> Optional[int]:
 
 
 def scaled_row(value: int, minimum: int, maximum: int, rows: int) -> int:
+    """Map a sample value into a terminal row number for the ASCII graph."""
     if maximum <= minimum:
         return rows // 2
 
@@ -89,6 +96,7 @@ def scaled_row(value: int, minimum: int, maximum: int, rows: int) -> int:
 
 
 def downsample(values: Iterable[int], width: int) -> list[int]:
+    """Compress a long sample history down to one value per terminal column."""
     values = list(values)
     if len(values) <= width:
         return values
@@ -104,6 +112,7 @@ def downsample(values: Iterable[int], width: int) -> list[int]:
 
 
 def level_bar(value: int, maximum: int, width: int) -> str:
+    """Render a compact text progress bar for volume-like values."""
     if maximum <= 0:
         filled = 0
     else:
@@ -112,6 +121,7 @@ def level_bar(value: int, maximum: int, width: int) -> str:
 
 
 def draw(values: Deque[int], stats: SessionStats, port: str, baud: int) -> None:
+    """Redraw the whole terminal with current mic stats and a rolling waveform."""
     terminal = shutil.get_terminal_size((100, 32))
     graph_width = max(20, terminal.columns - 2)
     graph_rows = max(8, terminal.lines - 13)
@@ -131,6 +141,7 @@ def draw(values: Deque[int], stats: SessionStats, port: str, baud: int) -> None:
         graph_min -= 1
         graph_max += 1
 
+    # Build the graph in memory first, then print it in one screen refresh.
     canvas = [[" " for _ in range(graph_width)] for _ in range(graph_rows)]
     zero_row = scaled_row(0, graph_min, graph_max, graph_rows)
     if 0 <= zero_row < graph_rows:
@@ -196,6 +207,7 @@ def draw(values: Deque[int], stats: SessionStats, port: str, baud: int) -> None:
 
 
 def main() -> int:
+    """Open serial, read CSV forever, and periodically redraw the graph."""
     parser = argparse.ArgumentParser(description="Live graph for Yappl mic serial CSV output.")
     parser.add_argument("port", nargs="?", help="Serial port, for example /dev/cu.usbmodemXXXX")
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD)
@@ -212,6 +224,7 @@ def main() -> int:
     last_draw = 0.0
 
     with serial.Serial(port, args.baud, timeout=0.1) as connection:
+        # Drop bootloader noise and old buffered lines so the graph starts fresh.
         connection.reset_input_buffer()
         while True:
             line = connection.readline()
