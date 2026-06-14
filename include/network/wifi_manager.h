@@ -4,6 +4,11 @@
 
 namespace yappl {
 
+struct WifiCredential {
+  const char *ssid;
+  const char *password;
+};
+
 // Small wrapper around Arduino WiFi. The rest of the app should ask this class
 // for connection status instead of calling WiFi directly everywhere.
 class WifiManager {

@@ -11,7 +11,35 @@
 #define YAPPL_WIFI_PASSWORD ""
 #endif
 
+#ifndef YAPPL_WIFI_SSID
+#define YAPPL_WIFI_SSID ""
+#endif
+
+#ifndef YAPPL_WIFI_PASSWORD
+#define YAPPL_WIFI_PASSWORD ""
+#endif
+
 namespace yappl {
+namespace {
+
+#if defined(YAPPL_WIFI_NETWORKS)
+const WifiCredential kWifiCredentials[] = YAPPL_WIFI_NETWORKS;
+#else
+const WifiCredential kWifiCredentials[] = {
+    {YAPPL_WIFI_SSID, YAPPL_WIFI_PASSWORD},
+};
+#endif
+
+constexpr size_t kWifiCredentialCount = sizeof(kWifiCredentials) / sizeof(kWifiCredentials[0]);
+
+bool credentialLooksValid(const WifiCredential &credential) {
+  return credential.ssid != nullptr &&
+         credential.password != nullptr &&
+         credential.ssid[0] != '\0' &&
+         credential.password[0] != '\0';
+}
+
+}  // namespace
 
 bool WifiManager::begin() {
   if (!AppConfig::enableWifi) {
@@ -19,35 +47,54 @@ bool WifiManager::begin() {
     return false;
   }
 
-  ssid_ = YAPPL_WIFI_SSID;
-  configured_ = ssid_.length() > 0 && String(YAPPL_WIFI_PASSWORD).length() > 0;
+  configured_ = false;
+  for (const WifiCredential &credential : kWifiCredentials) {
+    if (credentialLooksValid(credential)) {
+      configured_ = true;
+      break;
+    }
+  }
+
   if (!configured_) {
     Serial.println(F("Wi-Fi not configured. Copy include/secrets.example.h to include/secrets.h."));
     return false;
   }
 
-  Serial.printf("Connecting Wi-Fi: %s\n", ssid_.c_str());
-
   // Station mode means Yappl connects to your router. It is not creating its
   // own hotspot yet; captive portal setup can come later.
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  WiFi.begin(YAPPL_WIFI_SSID, YAPPL_WIFI_PASSWORD);
 
-  const uint32_t startedAtMs = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startedAtMs < AppConfig::wifiConnectTimeoutMs) {
-    delay(250);
-    Serial.print('.');
+  for (const WifiCredential &credential : kWifiCredentials) {
+    if (!credentialLooksValid(credential)) {
+      continue;
+    }
+
+    ssid_ = credential.ssid;
+    Serial.printf("Connecting Wi-Fi: %s\n", ssid_.c_str());
+
+    WiFi.disconnect(true);
+    delay(100);
+    WiFi.begin(credential.ssid, credential.password);
+
+    const uint32_t startedAtMs = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startedAtMs < AppConfig::wifiConnectTimeoutMs) {
+      delay(250);
+      Serial.print('.');
+    }
+    Serial.println();
+
+    if (isConnected()) {
+      Serial.printf("Wi-Fi connected. IP: %s\n", ipAddress().c_str());
+      return true;
+    }
+
+    Serial.printf("Wi-Fi connection failed: %s\n", ssid_.c_str());
   }
-  Serial.println();
 
-  if (!isConnected()) {
-    Serial.println(F("Wi-Fi connection failed"));
-    return false;
-  }
-
-  Serial.printf("Wi-Fi connected. IP: %s\n", ipAddress().c_str());
-  return true;
+  ssid_ = "";
+  Serial.println(F("All configured Wi-Fi networks failed"));
+  return false;
 }
 
 bool WifiManager::isConnected() const {
