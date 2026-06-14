@@ -3,14 +3,35 @@
 #include "app/config.h"
 
 namespace yappl {
+namespace {
 
-void StateController::begin(uint32_t nowMs) {
-  // Pick the correct boot mode from the temporary hardcoded time/yap settings.
-  mode_ = restingMode();
+bool sameJournalDay(uint64_t leftEpoch, uint64_t rightEpoch) {
+  // Shift both timestamps backward by the configured local boundary before
+  // asking localtime() for the calendar day. With a 4 AM boundary, 12:30 AM is
+  // still treated as the previous journal day.
+  const time_t boundarySeconds = static_cast<time_t>(AppConfig::journalDayBoundaryHour) * 60 * 60;
+  const time_t leftAdjusted = static_cast<time_t>(leftEpoch) - boundarySeconds;
+  const time_t rightAdjusted = static_cast<time_t>(rightEpoch) - boundarySeconds;
+
+  tm leftLocal = {};
+  tm rightLocal = {};
+  if (localtime_r(&leftAdjusted, &leftLocal) == nullptr ||
+      localtime_r(&rightAdjusted, &rightLocal) == nullptr) {
+    return false;
+  }
+
+  return leftLocal.tm_year == rightLocal.tm_year && leftLocal.tm_yday == rightLocal.tm_yday;
+}
+
+}  // namespace
+
+void StateController::begin(uint32_t nowMs, const TimeContext &time) {
+  // Pick the correct boot mode from real clock + stored yap history.
+  mode_ = restingMode(time);
   modeStartedAtMs_ = nowMs;
 }
 
-bool StateController::update(uint32_t nowMs, const AppState &snapshot) {
+bool StateController::update(uint32_t nowMs, const AppState &snapshot, const TimeContext &time) {
   const bool pressed = snapshot.buttonPressed;
   const bool pressedNow = pressed && !previousButtonPressed_;
 
@@ -30,10 +51,15 @@ bool StateController::update(uint32_t nowMs, const AppState &snapshot) {
   switch (mode_) {
     case AppMode::IdleDay:
     case AppMode::IdleNight:
-      if (pressedNow) {
+      if (pressed && nowMs - buttonPressedAtMs_ >= AppConfig::clearYapAndReactivateHoldMs) {
+        clearYapRequested_ = true;
+        enterMode(AppMode::Activation, nowMs);
+      } else if (!pressed && previousButtonPressed_) {
+        // A short idle press still gets the "not yet" response. Delaying this
+        // until release gives the long-hold reset gesture time to be detected.
         enterMode(AppMode::NotYet, nowMs);
       } else {
-        const AppMode rest = restingMode();
+        const AppMode rest = restingMode(time);
         if (rest != mode_) {
           enterMode(rest, nowMs);
         }
@@ -48,7 +74,7 @@ bool StateController::update(uint32_t nowMs, const AppState &snapshot) {
 
     case AppMode::NotYet:
       if (nowMs - modeStartedAtMs_ >= AppConfig::notYetDurationMs) {
-        enterMode(restingMode(), nowMs);
+        enterMode(restingMode(time), nowMs);
       }
       break;
 
@@ -61,20 +87,39 @@ bool StateController::update(uint32_t nowMs, const AppState &snapshot) {
     case AppMode::Listening:
       if (activationButtonReleased_ && pressed &&
           nowMs - buttonPressedAtMs_ >= AppConfig::listeningHoldToDeactivateMs) {
+        // The user's deliberate stop-hold means the session is complete. Mark
+        // it immediately instead of waiting for the GOOD NIGHT animation to
+        // finish, so the completion survives reset/power loss right away.
+        sessionCompletedPending_ = true;
         enterMode(AppMode::Deactivation, nowMs);
       }
       break;
 
     case AppMode::Deactivation:
       if (nowMs - modeStartedAtMs_ >= AppConfig::deactivationDurationMs) {
-        sessionCompletedThisBoot_ = true;
-        enterMode(restingMode(), nowMs);
+        enterMode(isNightTime(time) ? AppMode::IdleNight : AppMode::IdleDay, nowMs);
       }
       break;
   }
 
   previousButtonPressed_ = pressed;
   return before != mode_;
+}
+
+bool StateController::consumeSessionCompleted() {
+  if (!sessionCompletedPending_) {
+    return false;
+  }
+  sessionCompletedPending_ = false;
+  return true;
+}
+
+bool StateController::consumeClearYapRequested() {
+  if (!clearYapRequested_) {
+    return false;
+  }
+  clearYapRequested_ = false;
+  return true;
 }
 
 const char *StateController::modeName(AppMode mode) {
@@ -97,21 +142,57 @@ const char *StateController::modeName(AppMode mode) {
   return "unknown";
 }
 
-bool StateController::isNightTime() const {
-  // Temporary clock rule until real Wi-Fi/NTP time exists.
-  return AppConfig::stubCurrentHour >= 20 || AppConfig::stubCurrentHour < 8;
+bool StateController::isNightTime(const TimeContext &time) const {
+  if (!time.valid) {
+    return false;
+  }
+
+  return time.hour >= AppConfig::nightStartHour || time.hour < AppConfig::nightEndHour;
 }
 
-bool StateController::hasYappedRecently() const {
-  // A completed session during this boot counts immediately.
-  return sessionCompletedThisBoot_ || AppConfig::stubLastYapAgeHours < 18;
+bool StateController::hasYappedToday(const TimeContext &time) const {
+  if (time.completedThisBoot) {
+    return true;
+  }
+
+  if (!time.valid || !time.hasLastYap) {
+    return false;
+  }
+
+  return sameJournalDay(time.nowEpoch, time.lastYapEpoch);
 }
 
-AppMode StateController::restingMode() const {
-  if (!hasYappedRecently()) {
+bool StateController::reminderTimeReached(const TimeContext &time) const {
+  if (!time.valid) {
+    return false;
+  }
+
+  // The reminder window crosses midnight. Example with 21:00 start and 04:00
+  // journal boundary: 21:00..23:59 and 00:00..03:59 are both reminder time.
+  if (time.hour < AppConfig::journalDayBoundaryHour) {
+    return true;
+  }
+
+  if (time.hour > AppConfig::reminderStartHour) {
+    return true;
+  }
+  if (time.hour < AppConfig::reminderStartHour) {
+    return false;
+  }
+  return time.minute >= AppConfig::reminderStartMinute;
+}
+
+AppMode StateController::restingMode(const TimeContext &time) const {
+  // If time is invalid, avoid nagging. The device cannot know whether it is
+  // bedtime or whether today's session is complete yet.
+  if (!time.valid) {
+    return AppMode::IdleDay;
+  }
+
+  if (!hasYappedToday(time) && reminderTimeReached(time)) {
     return AppMode::Reminder;
   }
-  return isNightTime() ? AppMode::IdleNight : AppMode::IdleDay;
+  return isNightTime(time) ? AppMode::IdleNight : AppMode::IdleDay;
 }
 
 bool StateController::enterMode(AppMode mode, uint32_t nowMs) {

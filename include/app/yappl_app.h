@@ -13,7 +13,10 @@
 #include "drivers/photoresistor.h"
 #include "drivers/piezo_buzzer.h"
 #include "drivers/status_led.h"
+#include "network/time_sync.h"
+#include "network/wifi_manager.h"
 #include "services/act_player.h"
+#include "storage/yap_history_store.h"
 
 namespace yappl {
 
@@ -33,6 +36,9 @@ class YapplApp {
   PiezoBuzzer piezo_;
   Photoresistor photoresistor_;
   Button button_;
+  WifiManager wifi_;
+  TimeSync timeSync_;
+  YapHistoryStore yapHistory_;
 
   // Behavior service used by the display task.
   ActPlayer actPlayer_;
@@ -54,12 +60,15 @@ class YapplApp {
   bool displayReady_ = false;
   bool micReady_ = false;
   bool tasksStarted_ = false;
+  bool sessionCompletedThisBoot_ = false;
+  bool pendingLastYapSave_ = false;
   uint8_t lastLedBrightness_ = 0;
   uint16_t currentPiezoFrequencyHz_ = 0;
 
   // Helpers for turning raw hardware inputs into product values.
   uint8_t lightLevelFromRaw(int raw) const;
   bool startTasks();
+  TimeContext currentTimeContext();
 
   // Output helpers only touch hardware when the value actually changes.
   void setLedBrightness(uint8_t brightness);
@@ -76,7 +85,14 @@ class YapplApp {
   // state quickly and then do slow hardware work outside the lock.
   AppState stateSnapshot();
   void publishSensorState(bool buttonPressed, int lightRaw, uint8_t lightLevel, uint8_t micLevel);
-  void publishOutputState(AppMode mode, uint8_t ledBrightness, uint16_t piezoFrequencyHz, size_t recordedBytes);
+  void publishOutputState(AppMode mode,
+                          bool wifiConnected,
+                          bool timeSynced,
+                          uint8_t currentHour,
+                          uint8_t currentMinute,
+                          uint8_t ledBrightness,
+                          uint16_t piezoFrequencyHz,
+                          size_t recordedBytes);
 
   // RTOS task bodies.
   void outputTask();

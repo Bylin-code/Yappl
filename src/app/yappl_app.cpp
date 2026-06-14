@@ -24,6 +24,19 @@ void YapplApp::begin() {
   Serial.println(F("Yappl starting"));
   randomSeed(micros());
 
+  // Load the last completed yap timestamp from ESP32 flash. This survives
+  // reset and power loss, unlike normal RAM variables.
+  yapHistory_.begin();
+  if (AppConfig::clearYapHistoryOnBoot) {
+    yapHistory_.clearLastYap();
+  }
+
+  // Step one for internet support: connect to Wi-Fi once at boot. This is
+  // intentionally before RTOS tasks so network bring-up cannot race the app.
+  if (wifi_.begin()) {
+    timeSync_.begin();
+  }
+
   // The three RTOS tasks share AppState, so access is protected by this mutex.
   stateMutex_ = xSemaphoreCreateMutex();
   if (stateMutex_ == nullptr) {
@@ -55,15 +68,17 @@ void YapplApp::begin() {
 
   // Seed AppState with enough data for display/output tasks to start cleanly.
   const int lightRaw = AppConfig::enablePhotoresistor ? photoresistor_.readRaw() : 0;
-  stateController_.begin(millis());
+  const TimeContext time = currentTimeContext();
+  stateController_.begin(millis(), time);
   publishSensorState(false, lightRaw, lightLevelFromRaw(lightRaw), 0);
-  publishOutputState(stateController_.mode(), 0, 0, 0);
+  publishOutputState(stateController_.mode(), wifi_.isConnected(), time.valid, time.hour, time.minute, 0, 0, 0);
 
   Serial.println(micReady_ ? F("INMP441 ready") : F("INMP441 failed"));
-  Serial.printf("Stub time %02u:%02u, last yap age %u hours, boot mode %s\n",
-                AppConfig::stubCurrentHour,
-                AppConfig::stubCurrentMinute,
-                AppConfig::stubLastYapAgeHours,
+  Serial.printf("Clock %s %02u:%02u, last yap %s, boot mode %s\n",
+                time.valid ? "valid" : "invalid",
+                time.hour,
+                time.minute,
+                time.hasLastYap ? "stored" : "none",
                 StateController::modeName(stateController_.mode()));
 
   if (!startTasks()) {
@@ -126,6 +141,16 @@ bool YapplApp::startTasks() {
   // If any task fails to start, do not pretend the RTOS app is running.
   tasksStarted_ = outputStarted == pdPASS && sensorStarted == pdPASS && displayStarted == pdPASS;
   return tasksStarted_;
+}
+
+TimeContext YapplApp::currentTimeContext() {
+  TimeContext context;
+  context.valid = timeSync_.currentTime(context.hour, context.minute) &&
+                  timeSync_.currentEpoch(context.nowEpoch);
+  context.hasLastYap = yapHistory_.hasLastYap();
+  context.lastYapEpoch = yapHistory_.lastYapEpoch();
+  context.completedThisBoot = sessionCompletedThisBoot_;
+  return context;
 }
 
 void YapplApp::setLedBrightness(uint8_t brightness) {
@@ -250,6 +275,10 @@ void YapplApp::publishSensorState(bool buttonPressed, int lightRaw, uint8_t ligh
 }
 
 void YapplApp::publishOutputState(AppMode mode,
+                                  bool wifiConnected,
+                                  bool timeSynced,
+                                  uint8_t currentHour,
+                                  uint8_t currentMinute,
                                   uint8_t ledBrightness,
                                   uint16_t piezoFrequencyHz,
                                   size_t recordedBytes) {
@@ -260,6 +289,10 @@ void YapplApp::publishOutputState(AppMode mode,
 
   xSemaphoreTake(stateMutex_, portMAX_DELAY);
   state_.mode = mode;
+  state_.wifiConnected = wifiConnected;
+  state_.timeSynced = timeSynced;
+  state_.currentHour = currentHour;
+  state_.currentMinute = currentMinute;
   state_.ledBrightness = ledBrightness;
   state_.piezoFrequencyHz = piezoFrequencyHz;
   state_.recordedBytes = recordedBytes;
@@ -278,13 +311,37 @@ void YapplApp::outputTask() {
 
     // Decide if the product state should change. YapplApp reacts only to the
     // transition side effects it owns, such as clearing the recording buffer.
-    const bool modeChanged = stateController_.update(nowMs, snapshot);
+    TimeContext time = currentTimeContext();
+    const bool modeChanged = stateController_.update(nowMs, snapshot, time);
     const AppMode mode = stateController_.mode();
     if (modeChanged) {
       if (mode == AppMode::Listening) {
         resetRecording();
       }
       Serial.printf("Mode -> %s\n", StateController::modeName(mode));
+    }
+
+    if (stateController_.consumeClearYapRequested()) {
+      yapHistory_.clearLastYap();
+      sessionCompletedThisBoot_ = false;
+      pendingLastYapSave_ = false;
+      time = currentTimeContext();
+    }
+
+    if (stateController_.consumeSessionCompleted()) {
+      sessionCompletedThisBoot_ = true;
+      if (time.valid) {
+        pendingLastYapSave_ = !yapHistory_.saveLastYapEpoch(time.nowEpoch);
+        time = currentTimeContext();
+      } else {
+        pendingLastYapSave_ = true;
+        Serial.println(F("Session complete, but time is invalid; last yap not saved"));
+      }
+    }
+
+    if (pendingLastYapSave_ && time.valid) {
+      pendingLastYapSave_ = !yapHistory_.saveLastYapEpoch(time.nowEpoch);
+      time = currentTimeContext();
     }
 
     // Convert the current state into desired hardware outputs.
@@ -294,7 +351,15 @@ void YapplApp::outputTask() {
         OutputPatterns::piezoFrequencyFor(mode, stateController_.modeStartedAtMs(), nowMs);
     setLedBrightness(ledBrightness);
     setPiezoFrequency(piezoFrequencyHz);
-    publishOutputState(mode, ledBrightness, piezoFrequencyHz, recordedSamples_ * sizeof(int32_t));
+
+    publishOutputState(mode,
+                       wifi_.isConnected(),
+                       time.valid,
+                       time.hour,
+                       time.minute,
+                       ledBrightness,
+                       piezoFrequencyHz,
+                       recordedSamples_ * sizeof(int32_t));
 
     // Keep a steady task cadence even if one iteration runs a little late.
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(AppConfig::outputTaskPeriodMs));
@@ -358,7 +423,11 @@ void YapplApp::displayTask() {
       const AppState snapshot = stateSnapshot();
       // ActPlayer maps AppMode to the correct animated face frame.
       const FaceFrame &frame = actPlayer_.update(snapshot.mode, millis());
-      display_.drawFaceFrame(frame);
+      display_.drawFaceFrame(frame,
+                             snapshot.wifiConnected,
+                             snapshot.timeSynced,
+                             snapshot.currentHour,
+                             snapshot.currentMinute);
     }
 
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(AppConfig::displayTaskPeriodMs));

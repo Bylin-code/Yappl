@@ -3,3 +3,7 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Local Wi-Fi credentials. Copy include/secrets.example.h to include/secrets.h
+# on your own machine and fill it in; do not commit real network passwords.
+include/secrets.h

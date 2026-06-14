@@ -22,6 +22,13 @@ struct AppState {
   // Product state selected by the output task.
   AppMode mode = AppMode::IdleDay;
 
+  // Network status. This lets the OLED show Wi-Fi state even when Serial logs
+  // are unavailable or the USB monitor is flaky.
+  bool wifiConnected = false;
+  bool timeSynced = false;
+  uint8_t currentHour = 0;
+  uint8_t currentMinute = 0;
+
   // Input/sensor values published by the sensor task.
   bool buttonPressed = false;
   int lightRaw = 0;

@@ -14,9 +14,13 @@ class OledDisplay {
   bool begin();
   void clear();
 
-  // Draw exactly one frame produced by ActPlayer. This is the only current OLED
-  // rendering path for the product face.
-  void drawFaceFrame(const FaceFrame &frame);
+  // Draw exactly one frame produced by ActPlayer, plus a tiny top-right Wi-Fi
+  // status icon so connection state is visible without Serial Monitor.
+  void drawFaceFrame(const FaceFrame &frame,
+                     bool wifiConnected,
+                     bool timeSynced,
+                     uint8_t hour,
+                     uint8_t minute);
 };
 
 }  // namespace yappl

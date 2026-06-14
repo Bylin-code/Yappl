@@ -18,6 +18,44 @@ U8G2_SH1107_SEEED_128X128_F_HW_I2C g_oled(U8G2_R0, U8X8_PIN_NONE);
 constexpr uint8_t kDisplayWidth = 128;
 constexpr uint8_t kDisplayHeight = 128;
 
+void drawWifiIcon(bool connected, bool inverted) {
+  // Keep the icon in the upper-right corner and small enough that it does not
+  // compete with the character animation.
+  constexpr int16_t x = 114;
+  constexpr int16_t y = 4;
+
+  // On inverted frames the background is white, so draw the icon black.
+  g_oled.setDrawColor(inverted ? 0 : 1);
+
+  // Dot plus three rising bars reads well at tiny monochrome size.
+  g_oled.drawDisc(x + 2, y + 8, 1);
+  g_oled.drawVLine(x + 5, y + 6, 3);
+  g_oled.drawVLine(x + 8, y + 4, 5);
+  g_oled.drawVLine(x + 11, y + 2, 7);
+
+  if (!connected) {
+    // A diagonal slash means "Wi-Fi not connected" while preserving the same
+    // base icon shape.
+    g_oled.drawLine(x, y + 1, x + 13, y + 10);
+  }
+
+  g_oled.setDrawColor(1);
+}
+
+void drawClock(bool timeSynced, uint8_t hour, uint8_t minute, bool inverted) {
+  // Small top-left clock. "--:--" means Wi-Fi may be connected but NTP time has
+  // not been fetched yet.
+  char text[6] = "--:--";
+  if (timeSynced) {
+    snprintf(text, sizeof(text), "%02u:%02u", hour, minute);
+  }
+
+  g_oled.setDrawColor(inverted ? 0 : 1);
+  g_oled.setFont(u8g2_font_5x8_tf);
+  g_oled.drawStr(2, 10, text);
+  g_oled.setDrawColor(1);
+}
+
 }  // namespace
 
 bool OledDisplay::begin() {
@@ -41,7 +79,11 @@ void OledDisplay::clear() {
   g_oled.sendBuffer();
 }
 
-void OledDisplay::drawFaceFrame(const FaceFrame &frame) {
+void OledDisplay::drawFaceFrame(const FaceFrame &frame,
+                                bool wifiConnected,
+                                bool timeSynced,
+                                uint8_t hour,
+                                uint8_t minute) {
   // Convert frame metadata into the actual bitmap bytes to draw.
   const FaceBitmap &bitmap = faceBitmap(frame.bitmapId);
   // Center the face, then apply per-frame offsets for shaking/dancing.
@@ -60,6 +102,8 @@ void OledDisplay::drawFaceFrame(const FaceFrame &frame) {
   if (frame.invert) {
     g_oled.setDrawColor(1);
   }
+  drawClock(timeSynced, hour, minute, frame.invert);
+  drawWifiIcon(wifiConnected, frame.invert);
   g_oled.sendBuffer();
 }
 

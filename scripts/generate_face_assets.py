@@ -187,7 +187,9 @@ def draw_sleep_eyes(zzz_count: int = 0, good_night: bool = False, closed_y: int 
     c.line(62, closed_y + 2, 64, closed_y + 5, 1)
     c.line(76, closed_y + 1, 78, closed_y + 4, 1)
     for i in range(zzz_count):
-        c.text(66 + i * 9, 8 + i * 7, "Z", 1)
+        # Sleeping Zs should drift upward as they move right, like a little
+        # thought trail rising off the character.
+        c.text(66 + i * 9, 22 - i * 7, "Z", 1)
     if good_night:
         c.text(13, 50, "GOOD NIGHT!", 1)
     return c
@@ -201,8 +203,8 @@ def make_bitmaps() -> dict[str, Canvas]:
         "EyesBlinkClosed": draw_sleep_eyes(closed_y=32),
         "EyesLookLeft": draw_open_eyes(pupil_x=-8),
         "EyesLookRight": draw_open_eyes(pupil_x=8),
-        "EyesAnxiousLeft": draw_open_eyes(pupil_x=-7, droop=7, sweat=True),
-        "EyesAnxiousRight": draw_open_eyes(pupil_x=7, droop=7, sweat=True),
+        "EyesAnxiousLeft": draw_open_eyes(pupil_x=-7, droop=7),
+        "EyesAnxiousRight": draw_open_eyes(pupil_x=7, droop=7),
         "EyesNotYetLeft": draw_open_eyes(pupil_x=-7, eye_h=13, droop=4),
         "EyesNotYetRight": draw_open_eyes(pupil_x=7, eye_h=13, droop=4),
         "EyesDanceUp": draw_open_eyes(pupil_y=-6, sparkle=True),

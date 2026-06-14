@@ -6,9 +6,16 @@ namespace yappl {
 
 bool StatusLed::begin() {
   pinMode(AppConfig::ledPin, OUTPUT);
-  // Start dark so boot does not leave the LED in an unknown state.
-  set(false);
+
+  // ESP32 PWM is handled by LEDC. We configure it ourselves instead of relying
+  // on analogWrite's implicit setup, because the app uses RTOS tasks and should
+  // have deterministic hardware initialization.
+  ledcSetup(AppConfig::ledPwmChannel, AppConfig::ledPwmFrequencyHz, AppConfig::ledPwmResolutionBits);
+  ledcAttachPin(AppConfig::ledPin, AppConfig::ledPwmChannel);
   started_ = true;
+
+  // Start dark so boot does not leave the LED in an unknown state.
+  setBrightness(0);
   return true;
 }
 
@@ -17,8 +24,7 @@ void StatusLed::set(bool on) {
     return;
   }
 
-  // HIGH turns the LED on for the current wiring.
-  digitalWrite(AppConfig::ledPin, on ? HIGH : LOW);
+  setBrightness(on ? 255 : 0);
 }
 
 void StatusLed::setBrightness(uint8_t brightness) {
@@ -26,8 +32,7 @@ void StatusLed::setBrightness(uint8_t brightness) {
     return;
   }
 
-  // Arduino's ESP32 analogWrite uses LEDC PWM under the hood.
-  analogWrite(AppConfig::ledPin, brightness);
+  ledcWrite(AppConfig::ledPwmChannel, brightness);
 }
 
 }  // namespace yappl

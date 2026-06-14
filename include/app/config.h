@@ -35,6 +35,12 @@ struct AppConfig {
   static constexpr int piezoPin = 16;
   static constexpr int photoresistorPin = 8;
 
+  // ESP32 LED PWM settings. LEDC is the ESP32 hardware PWM peripheral.
+  // Keeping this explicit avoids Arduino analogWrite auto-setup problems.
+  static constexpr uint8_t ledPwmChannel = 0;
+  static constexpr uint32_t ledPwmFrequencyHz = 5000;
+  static constexpr uint8_t ledPwmResolutionBits = 8;
+
   // Button uses an external 10k pulldown, so pressed reads HIGH.
   static constexpr int buttonPin = 3;
 
@@ -48,16 +54,34 @@ struct AppConfig {
   static constexpr bool enableButton = true;
   static constexpr bool enableSerialLog = true;
 
-  // Temporary clock placeholders. These are intentionally hardcoded until
-  // Wi-Fi/time sync exists; change them before flashing to test different
-  // product states.
-  // Hour is 0-23. Minute is 0-59.
-  static constexpr uint8_t stubCurrentHour = 21;
-  static constexpr uint8_t stubCurrentMinute = 30;
+  // Step-one internet flag. For now this only connects to Wi-Fi at boot and
+  // prints status/IP over Serial; it does not call any cloud API yet.
+  static constexpr bool enableWifi = true;
 
-  // Fake age of the last completed yap session. 18+ hours triggers Reminder.
-  // Under 18 hours triggers IdleDay or IdleNight depending on stubCurrentHour.
-  static constexpr uint8_t stubLastYapAgeHours = 20;
+  // How long boot should wait for Wi-Fi before continuing local behavior.
+  // If Wi-Fi fails, Yappl still runs the current local routine.
+  static constexpr uint32_t wifiConnectTimeoutMs = 10000;
+
+  // Online time sync. NTP asks internet time servers for the current UTC time,
+  // then the TZ string converts it into local Pacific time with daylight saving.
+  static constexpr bool enableTimeSync = true;
+  static constexpr uint32_t timeSyncTimeoutMs = 8000;
+  static constexpr const char *ntpServer1 = "pool.ntp.org";
+  static constexpr const char *ntpServer2 = "time.nist.gov";
+  static constexpr const char *timeZone = "PST8PDT,M3.2.0/2,M11.1.0/2";
+
+  // Nightly reminder rules. Reminder can start at this local clock time if you
+  // have not yapped for the current journal day.
+  static constexpr uint8_t reminderStartHour = 21;
+  static constexpr uint8_t reminderStartMinute = 0;
+
+  // Journal days roll over at 4 AM instead of midnight, so a 12:30 AM session
+  // still counts for the previous night.
+  static constexpr uint8_t journalDayBoundaryHour = 4;
+
+  // Visual idle mode switches to night styling during this local time window.
+  static constexpr uint8_t nightStartHour = 20;
+  static constexpr uint8_t nightEndHour = 8;
 
   // Tune these after logging real readings from the installed light sensor.
   // With the suggested divider, brighter light should produce a higher value.
@@ -97,6 +121,15 @@ struct AppConfig {
 
   // Hold required to move from Listening into Deactivation.
   static constexpr uint32_t listeningHoldToDeactivateMs = 1000;
+
+  // Debug/product escape hatch: while sitting in an idle/sleeping state,
+  // holding the button this long clears any stored completion and starts a new
+  // session. If no stored completion exists, the clear is simply a no-op.
+  static constexpr uint32_t clearYapAndReactivateHoldMs = 5000;
+
+  // Leave false for normal use. If set true for one test flash, boot clears the
+  // stored yap timestamp. Set it back to false after that test.
+  static constexpr bool clearYapHistoryOnBoot = false;
 
   // Reminder LED brightness cap. 128 is about 50% of 8-bit PWM.
   static constexpr uint8_t reminderLedMaxBrightness = 128;
