@@ -36,6 +36,7 @@ void YapplApp::begin() {
   if (wifi_.begin()) {
     timeSync_.begin();
   }
+  backendReady_ = backend_.begin();
 
   // The three RTOS tasks share AppState, so access is protected by this mutex.
   stateMutex_ = xSemaphoreCreateMutex();
@@ -71,7 +72,7 @@ void YapplApp::begin() {
   const TimeContext time = currentTimeContext();
   stateController_.begin(millis(), time);
   publishSensorState(false, lightRaw, lightLevelFromRaw(lightRaw), 0);
-  publishOutputState(stateController_.mode(), wifi_.isConnected(), time.valid, time.hour, time.minute, 0, 0, 0);
+  publishOutputState(stateController_.mode(), wifi_.isConnected(), false, time.valid, time.hour, time.minute, 0, 0, 0);
 
   Serial.println(micReady_ ? F("INMP441 ready") : F("INMP441 failed"));
   Serial.printf("Clock %s %02u:%02u, last yap %s, boot mode %s\n",
@@ -138,8 +139,16 @@ bool YapplApp::startTasks() {
       AppConfig::displayTaskPriority,
       &displayTaskHandle_);
 
+  const BaseType_t networkStarted = xTaskCreate(
+      networkTaskEntry,
+      "yappl-network",
+      AppConfig::networkTaskStackBytes,
+      this,
+      AppConfig::networkTaskPriority,
+      &networkTaskHandle_);
+
   // If any task fails to start, do not pretend the RTOS app is running.
-  tasksStarted_ = outputStarted == pdPASS && sensorStarted == pdPASS && displayStarted == pdPASS;
+  tasksStarted_ = outputStarted == pdPASS && sensorStarted == pdPASS && displayStarted == pdPASS && networkStarted == pdPASS;
   return tasksStarted_;
 }
 
@@ -276,6 +285,7 @@ void YapplApp::publishSensorState(bool buttonPressed, int lightRaw, uint8_t ligh
 
 void YapplApp::publishOutputState(AppMode mode,
                                   bool wifiConnected,
+                                  bool backendConnected,
                                   bool timeSynced,
                                   uint8_t currentHour,
                                   uint8_t currentMinute,
@@ -290,6 +300,7 @@ void YapplApp::publishOutputState(AppMode mode,
   xSemaphoreTake(stateMutex_, portMAX_DELAY);
   state_.mode = mode;
   state_.wifiConnected = wifiConnected;
+  state_.backendConnected = backendConnected;
   state_.timeSynced = timeSynced;
   state_.currentHour = currentHour;
   state_.currentMinute = currentMinute;
@@ -330,6 +341,8 @@ void YapplApp::outputTask() {
 
     if (stateController_.consumeSessionCompleted()) {
       sessionCompletedThisBoot_ = true;
+      pendingBackendYapCompleted_ = true;
+      pendingBackendYapCompletedEpoch_ = time.valid ? time.nowEpoch : 0;
       if (time.valid) {
         pendingLastYapSave_ = !yapHistory_.saveLastYapEpoch(time.nowEpoch);
         time = currentTimeContext();
@@ -354,6 +367,7 @@ void YapplApp::outputTask() {
 
     publishOutputState(mode,
                        wifi_.isConnected(),
+                       backendConnected_,
                        time.valid,
                        time.hour,
                        time.minute,
@@ -425,12 +439,55 @@ void YapplApp::displayTask() {
       const FaceFrame &frame = actPlayer_.update(snapshot.mode, millis());
       display_.drawFaceFrame(frame,
                              snapshot.wifiConnected,
+                             snapshot.backendConnected,
                              snapshot.timeSynced,
                              snapshot.currentHour,
                              snapshot.currentMinute);
     }
 
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(AppConfig::displayTaskPeriodMs));
+  }
+}
+
+void YapplApp::networkTask() {
+  // Lowest-priority app task. HTTP can block for seconds on a bad network, so
+  // backend work lives here instead of inside output/display timing loops.
+  TickType_t lastWake = xTaskGetTickCount();
+  uint32_t lastPingMs = 0;
+  uint32_t lastStatusMs = 0;
+
+  while (true) {
+    const uint32_t nowMs = millis();
+    bool connected = backendConnected_;
+
+    if (backendReady_ && wifi_.isConnected()) {
+      if (pendingBackendYapCompleted_) {
+        if (backend_.sendYapCompleted(pendingBackendYapCompletedEpoch_)) {
+          pendingBackendYapCompleted_ = false;
+          connected = true;
+        }
+      }
+
+      if (nowMs - lastStatusMs >= AppConfig::backendStatusPeriodMs) {
+        lastStatusMs = nowMs;
+        const BackendStatus status = backend_.fetchStatus();
+        connected = status.requestOk || connected;
+      }
+
+      if (nowMs - lastPingMs >= AppConfig::backendPingPeriodMs) {
+        lastPingMs = nowMs;
+        const AppState snapshot = stateSnapshot();
+        connected = backend_.ping(snapshot.wifiConnected,
+                                  snapshot.timeSynced,
+                                  StateController::modeName(snapshot.mode)) ||
+                    connected;
+      }
+    } else {
+      connected = false;
+    }
+
+    backendConnected_ = connected;
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(AppConfig::networkTaskPeriodMs));
   }
 }
 
@@ -444,6 +501,10 @@ void YapplApp::sensorTaskEntry(void *context) {
 
 void YapplApp::displayTaskEntry(void *context) {
   static_cast<YapplApp *>(context)->displayTask();
+}
+
+void YapplApp::networkTaskEntry(void *context) {
+  static_cast<YapplApp *>(context)->networkTask();
 }
 
 }  // namespace yappl

@@ -58,6 +58,24 @@ struct AppConfig {
   // prints status/IP over Serial; it does not call any cloud API yet.
   static constexpr bool enableWifi = true;
 
+  // Backend API flag. When enabled and configured in include/secrets.h, Yappl
+  // periodically pings the backend and reports completed yap sessions.
+  static constexpr bool enableBackend = true;
+
+  // HTTP requests run in the network task, not the timing-sensitive output
+  // task. Keep this timeout short so a dead backend only delays status updates.
+  static constexpr uint32_t backendHttpTimeoutMs = 2500;
+
+  // How often the device sends a normal "I am alive" ping to the backend.
+  static constexpr uint32_t backendPingPeriodMs = 30000;
+
+  // How often the device asks the backend for device status.
+  static constexpr uint32_t backendStatusPeriodMs = 30000;
+
+  // Network task cadence. The task wakes often enough to send completion events
+  // quickly, but actual HTTP calls are rate-limited by the periods above.
+  static constexpr uint32_t networkTaskPeriodMs = 1000;
+
   // How long boot should wait for Wi-Fi before continuing local behavior.
   // If Wi-Fi fails, Yappl still runs the current local routine.
   static constexpr uint32_t wifiConnectTimeoutMs = 10000;
@@ -154,11 +172,14 @@ struct AppConfig {
   static constexpr uint32_t outputTaskStackBytes = 3072;
   static constexpr uint32_t sensorTaskStackBytes = 4096;
   static constexpr uint32_t displayTaskStackBytes = 6144;
+  static constexpr uint32_t networkTaskStackBytes = 8192;
 
-  // Output > sensor > display keeps LED/piezo responsive while OLED is slow.
+  // Output > sensor > display/network keeps LED/piezo responsive while OLED and
+  // HTTP work happen in slower background tasks.
   static constexpr UBaseType_t outputTaskPriority = 3;
   static constexpr UBaseType_t sensorTaskPriority = 2;
   static constexpr UBaseType_t displayTaskPriority = 1;
+  static constexpr UBaseType_t networkTaskPriority = 1;
 
   // Piezo off marker. Piezo volume is handled electrically for now.
   static constexpr uint16_t piezoSilentHz = 0;

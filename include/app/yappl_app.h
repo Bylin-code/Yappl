@@ -13,6 +13,7 @@
 #include "drivers/photoresistor.h"
 #include "drivers/piezo_buzzer.h"
 #include "drivers/status_led.h"
+#include "network/backend_client.h"
 #include "network/time_sync.h"
 #include "network/wifi_manager.h"
 #include "services/act_player.h"
@@ -38,6 +39,7 @@ class YapplApp {
   Button button_;
   WifiManager wifi_;
   TimeSync timeSync_;
+  BackendClient backend_;
   YapHistoryStore yapHistory_;
 
   // Behavior service used by the display task.
@@ -57,11 +59,16 @@ class YapplApp {
   TaskHandle_t outputTaskHandle_ = nullptr;
   TaskHandle_t sensorTaskHandle_ = nullptr;
   TaskHandle_t displayTaskHandle_ = nullptr;
+  TaskHandle_t networkTaskHandle_ = nullptr;
   bool displayReady_ = false;
   bool micReady_ = false;
+  bool backendReady_ = false;
+  bool backendConnected_ = false;
   bool tasksStarted_ = false;
   bool sessionCompletedThisBoot_ = false;
   bool pendingLastYapSave_ = false;
+  bool pendingBackendYapCompleted_ = false;
+  uint64_t pendingBackendYapCompletedEpoch_ = 0;
   uint8_t lastLedBrightness_ = 0;
   uint16_t currentPiezoFrequencyHz_ = 0;
 
@@ -87,6 +94,7 @@ class YapplApp {
   void publishSensorState(bool buttonPressed, int lightRaw, uint8_t lightLevel, uint8_t micLevel);
   void publishOutputState(AppMode mode,
                           bool wifiConnected,
+                          bool backendConnected,
                           bool timeSynced,
                           uint8_t currentHour,
                           uint8_t currentMinute,
@@ -98,12 +106,14 @@ class YapplApp {
   void outputTask();
   void sensorTask();
   void displayTask();
+  void networkTask();
 
   // FreeRTOS requires C-style entry points, so these thin wrappers cast the
   // context pointer back to the app instance.
   static void outputTaskEntry(void *context);
   static void sensorTaskEntry(void *context);
   static void displayTaskEntry(void *context);
+  static void networkTaskEntry(void *context);
 };
 
 }  // namespace yappl

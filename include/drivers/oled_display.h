@@ -18,6 +18,7 @@ class OledDisplay {
   // status icon so connection state is visible without Serial Monitor.
   void drawFaceFrame(const FaceFrame &frame,
                      bool wifiConnected,
+                     bool backendConnected,
                      bool timeSynced,
                      uint8_t hour,
                      uint8_t minute);

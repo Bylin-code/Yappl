@@ -25,6 +25,7 @@ struct AppState {
   // Network status. This lets the OLED show Wi-Fi state even when Serial logs
   // are unavailable or the USB monitor is flaky.
   bool wifiConnected = false;
+  bool backendConnected = false;
   bool timeSynced = false;
   uint8_t currentHour = 0;
   uint8_t currentMinute = 0;
