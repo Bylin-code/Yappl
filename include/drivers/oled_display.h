@@ -13,6 +13,9 @@ class OledDisplay {
  public:
   bool begin();
   void clear();
+
+  // Draw exactly one frame produced by ActPlayer. This is the only current OLED
+  // rendering path for the product face.
   void drawFaceFrame(const FaceFrame &frame);
 };
 

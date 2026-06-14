@@ -14,40 +14,62 @@ from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Placeholder face frames are 96x64 so they fit comfortably inside the 128x128
+# OLED while leaving room for future text/status if needed.
 WIDTH = 96
 HEIGHT = 64
 
 
 @dataclass(frozen=True)
 class FrameDef:
+    # Which bitmap drawing this frame should show.
     bitmap_id: str
+
+    # How long ActPlayer should hold this frame on screen.
     duration_ms: int
+
+    # Small offsets let one bitmap shake/dance without storing extra copies.
     x_offset: int = 0
     y_offset: int = 0
+
+    # Invert means draw white background and black bitmap pixels.
     invert: bool = False
 
 
 @dataclass(frozen=True)
 class ActDef:
+    # C++ enum name and human-readable debug name.
     act_id: str
     name: str
+
+    # Ordered frames that make up the act.
     frames: tuple[FrameDef, ...]
+
+    # Looping acts are default state faces; non-looping acts are cutscenes.
     loop: bool
+
+    # Optional-act scheduling knobs consumed by ActPlayer.
     min_downtime_ms: int
     chance_percent: int
 
 
 class Canvas:
+    """Tiny 1-bit drawing surface used to generate placeholder pixel art."""
+
     def __init__(self, width: int = WIDTH, height: int = HEIGHT) -> None:
         self.width = width
         self.height = height
+        # pixels[y][x] stores 0 for off and 1 for lit OLED pixel.
         self.pixels = [[0 for _ in range(width)] for _ in range(height)]
 
     def set(self, x: int, y: int, value: int = 1) -> None:
+        # Ignore out-of-bounds writes so drawing helpers can be simple.
         if 0 <= x < self.width and 0 <= y < self.height:
             self.pixels[y][x] = 1 if value else 0
 
     def ellipse(self, cx: int, cy: int, rx: int, ry: int, value: int = 1) -> None:
+        # Filled ellipse. Used for the big cartoon eyes and pupils.
         if rx <= 0 or ry <= 0:
             return
         for y in range(cy - ry, cy + ry + 1):
@@ -58,11 +80,13 @@ class Canvas:
                     self.set(x, y, value)
 
     def rect(self, x: int, y: int, w: int, h: int, value: int = 1) -> None:
+        # Filled rectangle. Used for eyelids, text pixels, and masks.
         for yy in range(y, y + h):
             for xx in range(x, x + w):
                 self.set(xx, yy, value)
 
     def line(self, x0: int, y0: int, x1: int, y1: int, value: int = 1) -> None:
+        # Bresenham line drawing, good enough for simple pixel-art strokes.
         dx = abs(x1 - x0)
         sx = 1 if x0 < x1 else -1
         dy = -abs(y1 - y0)
@@ -81,6 +105,8 @@ class Canvas:
                 y0 += sy
 
     def text(self, x: int, y: int, text: str, scale: int = 1) -> None:
+        # Minimal built-in text so GOOD NIGHT and ZZZ do not need font rendering
+        # in firmware.
         cursor = x
         for char in text.upper():
             glyph = FONT_5X7.get(char, FONT_5X7[" "])
@@ -91,6 +117,8 @@ class Canvas:
             cursor += 6 * scale
 
     def to_xbm_bytes(self) -> list[int]:
+        # U8g2 drawXBMP expects bits packed left-to-right, 8 horizontal pixels
+        # per byte, least-significant bit first.
         data: list[int] = []
         for y in range(self.height):
             for byte_x in range((self.width + 7) // 8):
@@ -104,6 +132,7 @@ class Canvas:
 
 
 FONT_5X7: dict[str, tuple[int, ...]] = {
+    # 5x7 uppercase glyphs used only by this generator.
     " ": (0, 0, 0, 0, 0, 0, 0),
     "!": (0b00100, 0b00100, 0b00100, 0b00100, 0, 0b00100, 0),
     "D": (0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110),
@@ -125,6 +154,8 @@ def draw_open_eyes(
     sweat: bool = False,
     sparkle: bool = False,
 ) -> Canvas:
+    # Main placeholder face: two big eyes. Parameters shift pupils, squash
+    # eyelids, and add simple emotion marks.
     c = Canvas()
     left = (31, 32)
     right = (65, 32)
@@ -147,6 +178,7 @@ def draw_open_eyes(
 
 
 def draw_sleep_eyes(zzz_count: int = 0, good_night: bool = False, closed_y: int = 34) -> Canvas:
+    # Closed-eye face used for night idle and deactivation.
     c = Canvas()
     c.line(16, closed_y, 42, closed_y + 2, 1)
     c.line(54, closed_y + 2, 80, closed_y, 1)
@@ -162,6 +194,7 @@ def draw_sleep_eyes(zzz_count: int = 0, good_night: bool = False, closed_y: int 
 
 
 def make_bitmaps() -> dict[str, Canvas]:
+    # Bitmap IDs here become FaceBitmapId enum values in generated C++.
     return {
         "EyesStraight": draw_open_eyes(),
         "EyesBlinkHalf": draw_open_eyes(eye_h=9),
@@ -189,6 +222,7 @@ def make_bitmaps() -> dict[str, Canvas]:
 
 
 ACTS: tuple[ActDef, ...] = (
+    # Acts here become FaceActId enum values plus frame tables in generated C++.
     ActDef("IdleStraight", "idle_straight", (FrameDef("EyesStraight", 1000),), True, 0, 0),
     ActDef(
         "Blink",
@@ -333,16 +367,21 @@ def write_header(bitmaps: dict[str, Canvas]) -> None:
 
 namespace yappl {{
 
+// One compiled 1-bit face bitmap. data points at XBM-style bytes in PROGMEM:
+// each bit is one OLED pixel, and U8g2 draws it with drawXBMP().
 struct FaceBitmap {{
   const uint8_t *data;
   uint8_t width;
   uint8_t height;
 }};
 
+// Stable IDs for generated placeholder face drawings. Higher-level animation
+// code refers to IDs instead of raw byte arrays.
 enum class FaceBitmapId : uint8_t {{
   {ids},
 }};
 
+// Look up bitmap metadata and bytes by ID.
 const FaceBitmap &faceBitmap(FaceBitmapId id);
 
 }}  // namespace yappl
@@ -357,6 +396,8 @@ def write_cpp(bitmaps: dict[str, Canvas]) -> None:
     parts: list[str] = [
         '#include "assets/face_bitmaps.h"\n\n',
         "namespace yappl {\nnamespace {\n\n",
+        "// Generated by scripts/generate_face_assets.py. These are 1-bit XBM-style byte\n",
+        "// arrays stored in flash with PROGMEM. Do not hand-edit individual bytes.\n\n",
     ]
     for key, canvas in bitmaps.items():
         data = canvas.to_xbm_bytes()
@@ -392,6 +433,8 @@ def write_animation_header() -> None:
 
 namespace yappl {{
 
+// One animation frame. It says which bitmap to draw, how long to hold it, and
+// whether to offset/invert it for simple motion effects.
 struct FaceFrame {{
   FaceBitmapId bitmapId;
   uint16_t durationMs;
@@ -400,19 +443,26 @@ struct FaceFrame {{
   bool invert;
 }};
 
+// A named OLED routine/act. Acts can loop forever as a state's default face, or
+// play once as an occasional override such as blink/shake/nod.
 struct FaceAct {{
   const char *name;
   const FaceFrame *frames;
   uint8_t frameCount;
   bool loop;
+  // Optional acts cannot replay until minDowntimeMs has passed. After that,
+  // chancePercent is tested by ActPlayer each display tick.
   uint32_t minDowntimeMs;
   uint8_t chancePercent;
 }};
 
+// Acts from docs/prompts/behaviore.txt. States choose one default act and may
+// allow optional acts for variety.
 enum class FaceActId : uint8_t {{
   {act_ids},
 }};
 
+// Look up animation metadata by ID.
 const FaceAct &faceAct(FaceActId id);
 
 }}  // namespace yappl
@@ -431,7 +481,12 @@ def frame_literal(frame: FrameDef) -> str:
 
 def write_animation_cpp() -> None:
     out = ROOT / "src/assets/face_animations.cpp"
-    parts = ['#include "assets/face_animations.h"\n\n', "namespace yappl {\nnamespace {\n\n"]
+    parts = [
+        '#include "assets/face_animations.h"\n\n',
+        "namespace yappl {\nnamespace {\n\n",
+        "// Generated by scripts/generate_face_assets.py. Edit the generator or future\n",
+        "// source art/config files instead of hand-editing these frame tables.\n\n",
+    ]
     for act in ACTS:
         parts.append(f"const FaceFrame k{act.act_id}Frames[] = {{\n")
         for frame in act.frames:

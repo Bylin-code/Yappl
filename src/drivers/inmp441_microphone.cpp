@@ -11,6 +11,8 @@ namespace yappl {
 namespace {
 
 constexpr i2s_port_t kMicPort = I2S_NUM_0;
+
+// INMP441 provides 24 useful bits in a 32-bit slot. The low 8 bits are padding.
 constexpr uint8_t kInmp441SlotShift = 8;
 
 // Arduino-ESP32 can be built against different ESP-IDF versions. Hide the I2S
@@ -39,6 +41,8 @@ bool Inmp441Microphone::begin(uint32_t sampleRateHz) {
   config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
   config.communication_format = standardI2sFormat();
   config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+  // DMA buffers let the I2S peripheral collect audio while app code is doing
+  // other work. dma_buf_len is measured in samples.
   config.dma_buf_count = 4;
   config.dma_buf_len = AppConfig::micSampleCount;
   config.use_apll = false;
@@ -46,12 +50,14 @@ bool Inmp441Microphone::begin(uint32_t sampleRateHz) {
   config.fixed_mclk = 0;
 
   i2s_pin_config_t pins = {};
+  // Only data_in is used; there is no speaker/output on this I2S port.
   pins.bck_io_num = AppConfig::micBclkPin;
   pins.ws_io_num = AppConfig::micLrclkPin;
   pins.data_out_num = I2S_PIN_NO_CHANGE;
   pins.data_in_num = AppConfig::micDataPin;
 
   if (i2s_driver_install(kMicPort, &config, 0, nullptr) != ESP_OK) {
+    // Usually means the port is already installed or config is invalid.
     return false;
   }
   if (i2s_set_pin(kMicPort, &pins) != ESP_OK) {
@@ -77,6 +83,7 @@ size_t Inmp441Microphone::read(int32_t *samples, size_t sampleCount) {
   // of timing-sensitive tasks.
   size_t bytesRead = 0;
   const size_t bytesRequested = sampleCount * sizeof(samples[0]);
+  // Timeout prevents this task from hanging forever if the mic/I2S bus fails.
   const esp_err_t result = i2s_read(kMicPort, samples, bytesRequested, &bytesRead, pdMS_TO_TICKS(100));
   if (result != ESP_OK) {
     return 0;
@@ -86,6 +93,7 @@ size_t Inmp441Microphone::read(int32_t *samples, size_t sampleCount) {
 }
 
 bool Inmp441Microphone::readLevel(int32_t *scratch, size_t sampleCount, MicLevelStats &stats) {
+  // scratch is both the I2S destination and the temporary analysis buffer.
   const size_t samplesRead = read(scratch, sampleCount);
   if (samplesRead == 0) {
     return false;
@@ -117,6 +125,7 @@ bool Inmp441Microphone::readLevel(int32_t *scratch, size_t sampleCount, MicLevel
   stats.span = static_cast<int32_t>(meterValue);
   stats.level = static_cast<uint8_t>(meterValue * 100 / AppConfig::noiseCeiling);
   if (meterValue > 0 && stats.level == 0) {
+    // Preserve a tiny visible response for very quiet nonzero sounds.
     stats.level = 1;
   }
   return true;

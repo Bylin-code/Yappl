@@ -60,20 +60,28 @@ class YapplApp {
   AppMode mode_ = AppMode::IdleDay;
   uint8_t lastLedBrightness_ = 0;
   uint16_t currentPiezoFrequencyHz_ = 0;
-  uint8_t melodyIndex_ = 0;
-  uint32_t lastMelodyNoteMs_ = 0;
 
+  // Helpers for turning raw hardware/time inputs into product behavior.
   uint8_t lightLevelFromRaw(int raw) const;
   bool startTasks();
   bool isNightTime() const;
   bool hasYappedRecently() const;
   AppMode restingMode() const;
+
+  // State-machine helpers. enterMode() performs one-time transition work;
+  // updateMode() decides whether the current mode should change.
   void enterMode(AppMode mode, uint32_t nowMs);
   void updateMode(uint32_t nowMs, const AppState &snapshot);
+
+  // Output helpers. They compute desired hardware outputs from the current mode,
+  // then only touch the hardware when the value actually changes.
   uint8_t ledBrightnessFor(uint32_t nowMs, const AppState &snapshot) const;
   uint16_t piezoFrequencyFor(uint32_t nowMs);
   void setLedBrightness(uint8_t brightness);
   void setPiezoFrequency(uint16_t frequencyHz);
+
+  // Temporary local recording support. This stores raw I2S slots during
+  // Listening; it does not upload or persist yet.
   void allocateRecordingBuffer();
   void resetRecording();
   void appendRecordingSamples(const int32_t *samples, size_t sampleCount);

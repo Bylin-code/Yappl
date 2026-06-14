@@ -17,6 +17,7 @@ void StatusLed::set(bool on) {
     return;
   }
 
+  // HIGH turns the LED on for the current wiring.
   digitalWrite(AppConfig::ledPin, on ? HIGH : LOW);
 }
 

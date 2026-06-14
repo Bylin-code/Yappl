@@ -4,14 +4,16 @@
 
 namespace yappl {
 
+// These are the product-level modes from docs/prompts/behaviore.txt.
+// The output task chooses the mode; the display task uses it to choose an act.
 enum class AppMode : uint8_t {
-  IdleDay,
-  Reminder,
-  NotYet,
-  Activation,
-  Listening,
-  Deactivation,
-  IdleNight,
+  IdleDay,       // Recently yapped, daytime: calm awake face.
+  Reminder,      // Has not yapped recently: remind with OLED/LED.
+  NotYet,        // Short refusal animation after pressing during idle.
+  Activation,    // Short happy transition before listening.
+  Listening,     // Mic read/recording state.
+  Deactivation,  // Good-night transition after ending listening.
+  IdleNight,     // Recently yapped, nighttime: sleeping face.
 };
 
 // Small shared snapshot of the system. RTOS tasks pass information through this
@@ -29,6 +31,9 @@ struct AppState {
   // Output values published by the output task for display/logging.
   uint8_t ledBrightness = 0;
   uint16_t piezoFrequencyHz = 0;
+
+  // Number of bytes captured into the temporary in-RAM/PSRAM recording buffer.
+  // This is diagnostic only until upload/storage exists.
   size_t recordedBytes = 0;
 };
 

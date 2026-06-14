@@ -27,11 +27,14 @@ void PiezoBuzzer::playFor(uint16_t frequencyHz, uint32_t durationMs) {
     return;
   }
 
+  // This returns immediately; Arduino's tone timer handles the duration.
   tone(AppConfig::piezoPin, frequencyHz, durationMs);
 }
 
 void PiezoBuzzer::stop() {
+  // noTone releases Arduino's tone timer for this pin.
   noTone(AppConfig::piezoPin);
+  // Drive low afterward so the passive piezo is less likely to float/buzz.
   digitalWrite(AppConfig::piezoPin, LOW);
 }
 

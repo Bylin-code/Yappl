@@ -8,7 +8,10 @@ namespace yappl {
 // a normalized light percentage happens in the app layer.
 class Photoresistor {
  public:
+  // Configure the ADC-capable GPIO as an input.
   bool begin();
+
+  // Return the raw ADC reading. AppConfig maps this to a light percentage.
   int readRaw() const;
 
  private:

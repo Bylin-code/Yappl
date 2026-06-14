@@ -13,6 +13,7 @@ bool Button::begin() {
 
 bool Button::isPressed() const {
   if (!started_) {
+    // A not-yet-started driver should fail safe as "not pressed."
     return false;
   }
 

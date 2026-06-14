@@ -8,7 +8,10 @@ namespace yappl {
 // external pulldown resistor, so pressed is HIGH.
 class Button {
  public:
+  // Configure the button GPIO as a plain input.
   bool begin();
+
+  // Return true when the external pulldown circuit is pulled up by a press.
   bool isPressed() const;
 
  private:
