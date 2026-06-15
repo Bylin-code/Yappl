@@ -105,14 +105,12 @@ struct AppConfig {
   static constexpr const char *ntpServer2 = "time.nist.gov";
   static constexpr const char *timeZone = "PST8PDT,M3.2.0/2,M11.1.0/2";
 
-  // Nightly reminder rules. Reminder can start at this local clock time if you
-  // have not yapped for the current journal day.
-  static constexpr uint8_t reminderStartHour = 21;
-  static constexpr uint8_t reminderStartMinute = 0;
-
-  // Journal days roll over at 4 AM instead of midnight, so a 12:30 AM session
-  // still counts for the previous night.
-  static constexpr uint8_t journalDayBoundaryHour = 4;
+  // Journal period rules. A period starts at 8 PM and ends at 6 AM, but the
+  // ready/reminder state intentionally continues after 6 AM if the user missed
+  // that period. At the next 8 PM, a fresh period starts and Yappl becomes
+  // ready again unless a yap happens in that new period.
+  static constexpr uint8_t journalPeriodStartHour = 20;
+  static constexpr uint8_t journalPeriodEndHour = 6;
 
   // Visual idle mode switches to night styling during this local time window.
   static constexpr uint8_t nightStartHour = 20;
@@ -163,10 +161,6 @@ struct AppConfig {
   // holding the button this long clears any stored completion and starts a new
   // session. If no stored completion exists, the clear is simply a no-op.
   static constexpr uint32_t clearYapAndReactivateHoldMs = 5000;
-
-  // Leave false for normal use. If set true for one test flash, boot clears the
-  // stored yap timestamp. Set it back to false after that test.
-  static constexpr bool clearYapHistoryOnBoot = false;
 
   // Reminder LED brightness cap. 128 is about 50% of 8-bit PWM.
   static constexpr uint8_t reminderLedMaxBrightness = 128;

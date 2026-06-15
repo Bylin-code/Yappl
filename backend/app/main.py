@@ -63,6 +63,98 @@ def storage_root() -> Path:
     return root
 
 
+def safe_device_id(device_id: str) -> str:
+    """Keep device IDs usable as folder names without allowing path traversal."""
+    return "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in device_id)
+
+
+def device_state_path(device_id: str) -> Path:
+    return storage_root() / "devices" / safe_device_id(device_id) / "state.json"
+
+
+def read_device_state(device_id: str) -> dict:
+    """Load durable device state from disk, then mirror it in memory."""
+    path = device_state_path(device_id)
+    if path.exists():
+        state = json.loads(path.read_text())
+    else:
+        state = device_state.get(device_id, {})
+    device_state[device_id] = state
+    return state
+
+
+def write_device_state(device_id: str, state: dict) -> None:
+    """Persist device state so rebooted devices/backend containers remember it."""
+    path = device_state_path(device_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True))
+    device_state[device_id] = state
+
+
+def sessions_root() -> Path:
+    root = storage_root() / "sessions"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def latest_completed_session_for_device(device_id: str) -> dict | None:
+    """Find the newest completed session metadata for one device."""
+    latest: dict | None = None
+    latest_epoch = -1
+
+    for path in sessions_root().glob("session_*/metadata.json"):
+        try:
+            metadata = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            print("skipping unreadable session metadata:", str(path), flush=True)
+            continue
+
+        if metadata.get("device_id") != device_id:
+            continue
+
+        completed_epoch = metadata.get("completed_at_epoch")
+        if not isinstance(completed_epoch, int) or completed_epoch <= 0:
+            continue
+
+        if completed_epoch > latest_epoch:
+            latest = metadata
+            latest_epoch = completed_epoch
+
+    return latest
+
+
+def refresh_state_from_sessions(device_id: str, state: dict) -> dict:
+    """Make session folders the ground truth for last-yap fields in state.json."""
+    latest = latest_completed_session_for_device(device_id)
+    previous_epoch = state.get("last_yap_completed_at_epoch")
+
+    if latest is None:
+        if previous_epoch is not None:
+            print("no prior completed sessions found; clearing last yap state:", device_id, flush=True)
+        else:
+            print("no prior completed sessions found:", device_id, flush=True)
+        state.pop("last_yap_completed_at", None)
+        state.pop("last_yap_completed_at_epoch", None)
+        state.pop("last_session_id", None)
+        return state
+
+    latest_epoch = latest["completed_at_epoch"]
+    state["last_yap_completed_at"] = latest.get("completed_at")
+    state["last_yap_completed_at_epoch"] = latest_epoch
+    state["last_session_id"] = latest.get("session_id")
+
+    if previous_epoch != latest_epoch:
+        print(
+            "last yap state refreshed from sessions:",
+            device_id,
+            f"session={state['last_session_id']}",
+            f"epoch={latest_epoch}",
+            flush=True,
+        )
+
+    return state
+
+
 def session_dir(session_id: str) -> Path:
     return storage_root() / "sessions" / session_id
 
@@ -220,11 +312,9 @@ def session_finish(payload: SessionFinish, authorization: str | None = Header(de
     metadata = convert_pcm_to_mp3(payload.session_id, metadata)
     write_metadata(payload.session_id, metadata)
 
-    state = device_state.setdefault(payload.device_id, {})
-    state["last_yap_completed_at"] = metadata["completed_at"]
-    state["last_yap_completed_at_epoch"] = payload.completed_at_epoch
-    state["last_session_id"] = payload.session_id
-    state["has_yapped_today"] = True
+    state = read_device_state(payload.device_id)
+    state = refresh_state_from_sessions(payload.device_id, state)
+    write_device_state(payload.device_id, state)
 
     print(
         "session finished:",
@@ -239,7 +329,7 @@ def session_finish(payload: SessionFinish, authorization: str | None = Header(de
         "audio_bytes": metadata["audio_bytes"],
         "mp3_status": metadata.get("mp3_status"),
         "mp3_bytes": metadata.get("mp3_bytes", 0),
-        "has_yapped_today": True,
+        "last_yap_completed_at_epoch": payload.completed_at_epoch,
     }
 
 
@@ -281,11 +371,13 @@ def device_ping(payload: DevicePing, authorization: str | None = Header(default=
     """Called by Yappl so the backend knows the device is online."""
     require_device_secret(authorization)
 
-    state = device_state.setdefault(payload.device_id, {})
+    state = read_device_state(payload.device_id)
     state["last_seen_at"] = now_iso()
     state["wifi_connected"] = payload.wifi_connected
     state["time_synced"] = payload.time_synced
     state["mode"] = payload.mode
+    state = refresh_state_from_sessions(payload.device_id, state)
+    write_device_state(payload.device_id, state)
 
     print(
         "device ping received:",
@@ -307,10 +399,9 @@ def yap_completed(payload: YapCompleted, authorization: str | None = Header(defa
     """Called when the device finishes a yap session."""
     require_device_secret(authorization)
 
-    state = device_state.setdefault(payload.device_id, {})
-    state["last_yap_completed_at"] = now_iso()
-    state["last_yap_completed_at_epoch"] = payload.completed_at_epoch
-    state["has_yapped_today"] = True
+    state = read_device_state(payload.device_id)
+    state = refresh_state_from_sessions(payload.device_id, state)
+    write_device_state(payload.device_id, state)
 
     print(
         "yap completed:",
@@ -321,7 +412,7 @@ def yap_completed(payload: YapCompleted, authorization: str | None = Header(defa
 
     return {
         "status": "ok",
-        "has_yapped_today": True,
+        "last_yap_completed_at_epoch": state.get("last_yap_completed_at_epoch"),
         "server_time": now_iso(),
     }
 
@@ -331,12 +422,14 @@ def device_status(device_id: str, authorization: str | None = Header(default=Non
     """Returns the backend's current memory of this device."""
     require_device_secret(authorization)
 
-    state = device_state.get(device_id, {})
+    state = read_device_state(device_id)
+    state = refresh_state_from_sessions(device_id, state)
+    write_device_state(device_id, state)
     return {
         "device_id": device_id,
-        "has_yapped_today": bool(state.get("has_yapped_today", False)),
         "last_seen_at": state.get("last_seen_at"),
         "last_yap_completed_at": state.get("last_yap_completed_at"),
+        "last_yap_completed_at_epoch": state.get("last_yap_completed_at_epoch"),
         "last_session_id": state.get("last_session_id"),
         "server_time": now_iso(),
     }

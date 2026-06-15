@@ -9,7 +9,7 @@ namespace yappl {
 // while the backend is still proving basic connectivity.
 struct BackendStatus {
   bool requestOk = false;
-  bool hasYappedToday = false;
+  uint64_t lastYapCompletedAtEpoch = 0;
 };
 
 // Small HTTP client for Yappl's backend API. It owns URL construction, auth
@@ -35,7 +35,7 @@ class BackendClient {
   String urlFor(const char *path) const;
   void addAuthHeader(HTTPClient &http) const;
   String jsonStringValue(const String &body, const char *fieldName) const;
-  bool responseHasTrue(const String &body, const char *fieldName) const;
+  uint64_t jsonUnsignedValue(const String &body, const char *fieldName) const;
 
   bool configured_ = false;
   size_t backendIndex_ = 0;

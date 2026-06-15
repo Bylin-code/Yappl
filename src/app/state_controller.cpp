@@ -5,22 +5,30 @@
 namespace yappl {
 namespace {
 
-bool sameJournalDay(uint64_t leftEpoch, uint64_t rightEpoch) {
-  // Shift both timestamps backward by the configured local boundary before
-  // asking localtime() for the calendar day. With a 4 AM boundary, 12:30 AM is
-  // still treated as the previous journal day.
-  const time_t boundarySeconds = static_cast<time_t>(AppConfig::journalDayBoundaryHour) * 60 * 60;
-  const time_t leftAdjusted = static_cast<time_t>(leftEpoch) - boundarySeconds;
-  const time_t rightAdjusted = static_cast<time_t>(rightEpoch) - boundarySeconds;
-
-  tm leftLocal = {};
-  tm rightLocal = {};
-  if (localtime_r(&leftAdjusted, &leftLocal) == nullptr ||
-      localtime_r(&rightAdjusted, &rightLocal) == nullptr) {
-    return false;
+uint64_t latestJournalPeriodStartEpoch(uint64_t nowEpoch) {
+  // The product rule is based on the latest 8 PM local start, not midnight.
+  // Before 8 PM, the relevant period is the one that started yesterday at 8 PM.
+  time_t now = static_cast<time_t>(nowEpoch);
+  tm local = {};
+  if (localtime_r(&now, &local) == nullptr) {
+    return 0;
   }
 
-  return leftLocal.tm_year == rightLocal.tm_year && leftLocal.tm_yday == rightLocal.tm_yday;
+  local.tm_hour = AppConfig::journalPeriodStartHour;
+  local.tm_min = 0;
+  local.tm_sec = 0;
+  local.tm_isdst = -1;
+
+  time_t start = mktime(&local);
+  if (start < 0) {
+    return 0;
+  }
+
+  if (now < start) {
+    start -= 24 * 60 * 60;
+  }
+
+  return static_cast<uint64_t>(start);
 }
 
 }  // namespace
@@ -150,46 +158,27 @@ bool StateController::isNightTime(const TimeContext &time) const {
   return time.hour >= AppConfig::nightStartHour || time.hour < AppConfig::nightEndHour;
 }
 
-bool StateController::hasYappedToday(const TimeContext &time) const {
-  if (time.completedThisBoot) {
-    return true;
-  }
-
+bool StateController::hasYappedInCurrentJournalPeriod(const TimeContext &time) const {
   if (!time.valid || !time.hasLastYap) {
     return false;
   }
 
-  return sameJournalDay(time.nowEpoch, time.lastYapEpoch);
-}
-
-bool StateController::reminderTimeReached(const TimeContext &time) const {
-  if (!time.valid) {
+  const uint64_t periodStart = latestJournalPeriodStartEpoch(time.nowEpoch);
+  if (periodStart == 0) {
     return false;
   }
 
-  // The reminder window crosses midnight. Example with 21:00 start and 04:00
-  // journal boundary: 21:00..23:59 and 00:00..03:59 are both reminder time.
-  if (time.hour < AppConfig::journalDayBoundaryHour) {
-    return true;
-  }
-
-  if (time.hour > AppConfig::reminderStartHour) {
-    return true;
-  }
-  if (time.hour < AppConfig::reminderStartHour) {
-    return false;
-  }
-  return time.minute >= AppConfig::reminderStartMinute;
+  return time.lastYapEpoch >= periodStart && time.lastYapEpoch <= time.nowEpoch;
 }
 
 AppMode StateController::restingMode(const TimeContext &time) const {
-  // If time is invalid, avoid nagging. The device cannot know whether it is
-  // bedtime or whether today's session is complete yet.
+  // If time is invalid, avoid nagging. The device cannot know which 8 PM
+  // journal period applies yet.
   if (!time.valid) {
     return AppMode::IdleDay;
   }
 
-  if (!hasYappedToday(time) && reminderTimeReached(time)) {
+  if (!hasYappedInCurrentJournalPeriod(time)) {
     return AppMode::Reminder;
   }
   return isNightTime(time) ? AppMode::IdleNight : AppMode::IdleDay;

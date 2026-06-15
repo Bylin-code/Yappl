@@ -18,7 +18,6 @@
 #include "network/time_sync.h"
 #include "network/wifi_manager.h"
 #include "services/act_player.h"
-#include "storage/yap_history_store.h"
 
 namespace yappl {
 
@@ -41,7 +40,6 @@ class YapplApp {
   WifiManager wifi_;
   TimeSync timeSync_;
   BackendClient backend_;
-  YapHistoryStore yapHistory_;
 
   // Behavior service used by the display task.
   ActPlayer actPlayer_;
@@ -58,6 +56,8 @@ class YapplApp {
   size_t audioRingBytesUsed_ = 0;
   size_t recordedBytes_ = 0;
   size_t droppedAudioBytes_ = 0;
+  portMUX_TYPE yapEpochMux_ = portMUX_INITIALIZER_UNLOCKED;
+  uint64_t lastYapEpochThisBoot_ = 0;
 
   // Shared state and RTOS handles.
   AppState state_;
@@ -71,8 +71,6 @@ class YapplApp {
   bool backendReady_ = false;
   bool backendConnected_ = false;
   bool tasksStarted_ = false;
-  bool sessionCompletedThisBoot_ = false;
-  bool pendingLastYapSave_ = false;
   bool pendingBackendYapCompleted_ = false;
   uint64_t pendingBackendYapCompletedEpoch_ = 0;
   bool pendingBackendSessionStart_ = false;
@@ -86,6 +84,8 @@ class YapplApp {
   uint8_t lightLevelFromRaw(int raw) const;
   bool startTasks();
   TimeContext currentTimeContext();
+  void rememberLastYapEpoch(uint64_t epoch);
+  uint64_t lastYapEpochThisBoot();
 
   // Output helpers only touch hardware when the value actually changes.
   void setLedBrightness(uint8_t brightness);

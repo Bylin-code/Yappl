@@ -256,11 +256,11 @@ BackendStatus BackendClient::fetchStatus() {
   http.end();
 
   status.requestOk = code >= 200 && code < 300;
-  status.hasYappedToday = status.requestOk && responseHasTrue(body, "has_yapped_today");
-  Serial.printf("Backend status %s: HTTP %d yapped_today=%s\n",
+  status.lastYapCompletedAtEpoch = status.requestOk ? jsonUnsignedValue(body, "last_yap_completed_at_epoch") : 0;
+  Serial.printf("Backend status %s: HTTP %d last_yap_epoch=%llu\n",
                 status.requestOk ? "OK" : "failed",
                 code,
-                status.hasYappedToday ? "true" : "false");
+                static_cast<unsigned long long>(status.lastYapCompletedAtEpoch));
   markRequestResult(status.requestOk);
   return status;
 }
@@ -353,14 +353,43 @@ String BackendClient::jsonStringValue(const String &body, const char *fieldName)
   return body.substring(start, end);
 }
 
-bool BackendClient::responseHasTrue(const String &body, const char *fieldName) const {
-  const String pattern = "\"" + String(fieldName) + "\":true";
+uint64_t BackendClient::jsonUnsignedValue(const String &body, const char *fieldName) const {
+  const String key = "\"" + String(fieldName) + "\"";
+  int index = body.indexOf(key);
+  if (index < 0) {
+    return 0;
+  }
+
+  index = body.indexOf(':', index);
+  if (index < 0) {
+    return 0;
+  }
+
   String compact = body;
   compact.replace(" ", "");
   compact.replace("\n", "");
   compact.replace("\r", "");
   compact.replace("\t", "");
-  return compact.indexOf(pattern) >= 0;
+
+  index = compact.indexOf(key);
+  if (index < 0) {
+    return 0;
+  }
+  index = compact.indexOf(':', index);
+  if (index < 0 || index + 1 >= compact.length()) {
+    return 0;
+  }
+
+  const int start = index + 1;
+  int end = start;
+  while (end < compact.length() && isDigit(compact[end])) {
+    ++end;
+  }
+  if (end == start) {
+    return 0;
+  }
+
+  return strtoull(compact.substring(start, end).c_str(), nullptr, 10);
 }
 
 }  // namespace yappl

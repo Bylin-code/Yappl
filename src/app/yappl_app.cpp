@@ -24,19 +24,19 @@ void YapplApp::begin() {
   Serial.println(F("Yappl starting"));
   randomSeed(micros());
 
-  // Load the last completed yap timestamp from ESP32 flash. This survives
-  // reset and power loss, unlike normal RAM variables.
-  yapHistory_.begin();
-  if (AppConfig::clearYapHistoryOnBoot) {
-    yapHistory_.clearLastYap();
-  }
-
   // Step one for internet support: connect to Wi-Fi once at boot. This is
   // intentionally before RTOS tasks so network bring-up cannot race the app.
   if (wifi_.begin()) {
     timeSync_.begin();
   }
   backendReady_ = backend_.begin();
+  if (backendReady_ && wifi_.isConnected()) {
+    const BackendStatus status = backend_.fetchStatus();
+    backendConnected_ = status.requestOk;
+    if (status.lastYapCompletedAtEpoch > 0) {
+      rememberLastYapEpoch(status.lastYapCompletedAtEpoch);
+    }
+  }
 
   // The three RTOS tasks share AppState, so access is protected by this mutex.
   stateMutex_ = xSemaphoreCreateMutex();
@@ -70,14 +70,14 @@ void YapplApp::begin() {
   const TimeContext time = currentTimeContext();
   stateController_.begin(millis(), time);
   publishSensorState(false, lightRaw, lightLevelFromRaw(lightRaw), 0);
-  publishOutputState(stateController_.mode(), wifi_.isConnected(), false, time.valid, time.hour, time.minute, 0, 0, 0);
+  publishOutputState(stateController_.mode(), wifi_.isConnected(), backendConnected_, time.valid, time.hour, time.minute, 0, 0, 0);
 
   Serial.println(micReady_ ? F("INMP441 ready") : F("INMP441 failed"));
   Serial.printf("Clock %s %02u:%02u, last yap %s, boot mode %s\n",
                 time.valid ? "valid" : "invalid",
                 time.hour,
                 time.minute,
-                time.hasLastYap ? "stored" : "none",
+                time.hasLastYap ? "cloud/RAM" : "none",
                 StateController::modeName(stateController_.mode()));
 
   if (!startTasks()) {
@@ -154,10 +154,32 @@ TimeContext YapplApp::currentTimeContext() {
   TimeContext context;
   context.valid = timeSync_.currentTime(context.hour, context.minute) &&
                   timeSync_.currentEpoch(context.nowEpoch);
-  context.hasLastYap = yapHistory_.hasLastYap();
-  context.lastYapEpoch = yapHistory_.lastYapEpoch();
-  context.completedThisBoot = sessionCompletedThisBoot_;
+
+  // Cloud is the only persistent source for last-yap history. During one boot,
+  // RAM remembers a just-completed or backend-fetched epoch so the state machine
+  // can react immediately without writing journal history to ESP32 flash.
+  context.lastYapEpoch = lastYapEpochThisBoot();
+  context.hasLastYap = context.lastYapEpoch > 0;
   return context;
+}
+
+void YapplApp::rememberLastYapEpoch(uint64_t epoch) {
+  if (epoch == 0) {
+    return;
+  }
+
+  portENTER_CRITICAL(&yapEpochMux_);
+  if (epoch > lastYapEpochThisBoot_) {
+    lastYapEpochThisBoot_ = epoch;
+  }
+  portEXIT_CRITICAL(&yapEpochMux_);
+}
+
+uint64_t YapplApp::lastYapEpochThisBoot() {
+  portENTER_CRITICAL(&yapEpochMux_);
+  const uint64_t epoch = lastYapEpochThisBoot_;
+  portEXIT_CRITICAL(&yapEpochMux_);
+  return epoch;
 }
 
 void YapplApp::setLedBrightness(uint8_t brightness) {
@@ -385,14 +407,13 @@ void YapplApp::outputTask() {
     }
 
     if (stateController_.consumeClearYapRequested()) {
-      yapHistory_.clearLastYap();
-      sessionCompletedThisBoot_ = false;
-      pendingLastYapSave_ = false;
+      portENTER_CRITICAL(&yapEpochMux_);
+      lastYapEpochThisBoot_ = 0;
+      portEXIT_CRITICAL(&yapEpochMux_);
       time = currentTimeContext();
     }
 
     if (stateController_.consumeSessionCompleted()) {
-      sessionCompletedThisBoot_ = true;
       pendingBackendYapCompleted_ = true;
       pendingBackendYapCompletedEpoch_ = time.valid ? time.nowEpoch : 0;
       pendingBackendSessionFinish_ = true;
@@ -405,17 +426,11 @@ void YapplApp::outputTask() {
                     static_cast<unsigned>(bufferedBytes),
                     static_cast<unsigned>(droppedAudioBytes_));
       if (time.valid) {
-        pendingLastYapSave_ = !yapHistory_.saveLastYapEpoch(time.nowEpoch);
+        rememberLastYapEpoch(time.nowEpoch);
         time = currentTimeContext();
       } else {
-        pendingLastYapSave_ = true;
-        Serial.println(F("Session complete, but time is invalid; last yap not saved"));
+        Serial.println(F("Session complete, but time is invalid; backend will receive epoch 0"));
       }
-    }
-
-    if (pendingLastYapSave_ && time.valid) {
-      pendingLastYapSave_ = !yapHistory_.saveLastYapEpoch(time.nowEpoch);
-      time = currentTimeContext();
     }
 
     // Convert the current state into desired hardware outputs.
@@ -514,8 +529,8 @@ void YapplApp::networkTask() {
   // Lowest-priority app task. HTTP can block for seconds on a bad network, so
   // backend work lives here instead of inside output/display timing loops.
   TickType_t lastWake = xTaskGetTickCount();
-  uint32_t lastPingMs = 0;
-  uint32_t lastStatusMs = 0;
+  uint32_t lastPingMs = millis() - AppConfig::backendPingPeriodMs;
+  uint32_t lastStatusMs = millis() - AppConfig::backendStatusPeriodMs;
 
   while (true) {
     const uint32_t nowMs = millis();
@@ -574,6 +589,9 @@ void YapplApp::networkTask() {
         lastStatusMs = nowMs;
         const BackendStatus status = backend_.fetchStatus();
         connected = status.requestOk || connected;
+        if (status.requestOk && status.lastYapCompletedAtEpoch > 0) {
+          rememberLastYapEpoch(status.lastYapCompletedAtEpoch);
+        }
       }
 
       if (nowMs - lastPingMs >= AppConfig::backendPingPeriodMs) {

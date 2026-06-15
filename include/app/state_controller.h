@@ -15,7 +15,6 @@ struct TimeContext {
   uint64_t nowEpoch = 0;
   bool hasLastYap = false;
   uint64_t lastYapEpoch = 0;
-  bool completedThisBoot = false;
 };
 
 // Owns the product state machine: current mode, transition timers, and button
@@ -34,8 +33,7 @@ class StateController {
 
  private:
   bool isNightTime(const TimeContext &time) const;
-  bool hasYappedToday(const TimeContext &time) const;
-  bool reminderTimeReached(const TimeContext &time) const;
+  bool hasYappedInCurrentJournalPeriod(const TimeContext &time) const;
   AppMode restingMode(const TimeContext &time) const;
   bool enterMode(AppMode mode, uint32_t nowMs);
 
