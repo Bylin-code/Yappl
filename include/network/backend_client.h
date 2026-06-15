@@ -22,11 +22,15 @@ class BackendClient {
 
   bool ping(bool wifiConnected, bool timeSynced, const char *modeName);
   bool sendYapCompleted(uint64_t completedAtEpoch);
+  String startAudioSession(uint64_t startedAtEpoch, uint32_t sampleRateHz);
+  bool uploadAudioChunk(const String &sessionId, const uint8_t *data, size_t byteCount);
+  bool finishAudioSession(const String &sessionId, uint64_t completedAtEpoch);
   BackendStatus fetchStatus();
 
  private:
   String urlFor(const char *path) const;
   void addAuthHeader(HTTPClient &http) const;
+  String jsonStringValue(const String &body, const char *fieldName) const;
   bool responseHasTrue(const String &body, const char *fieldName) const;
 
   bool configured_ = false;

@@ -2,8 +2,6 @@
 
 #include <algorithm>
 
-#include <esp_heap_caps.h>
-
 #include "app/config.h"
 #include "app/output_patterns.h"
 
@@ -63,9 +61,12 @@ void YapplApp::begin() {
     button_.begin();
   }
 
-  // Try to reserve recording memory up front so Listening does not suddenly
-  // allocate while the user is talking.
-  allocateRecordingBuffer();
+  // Audio upload uses a fixed FreeRTOS queue instead of a large recording
+  // buffer. This board has no PSRAM, so streaming chunks is more realistic.
+  audioUploadQueue_ = xQueueCreate(AppConfig::audioUploadQueueLength, sizeof(AudioUploadChunk));
+  if (audioUploadQueue_ == nullptr) {
+    Serial.println(F("Failed to create audio upload queue"));
+  }
 
   // Seed AppState with enough data for display/output tasks to start cleanly.
   const int lightRaw = AppConfig::enablePhotoresistor ? photoresistor_.readRaw() : 0;
@@ -187,51 +188,51 @@ void YapplApp::setPiezoFrequency(uint16_t frequencyHz) {
   currentPiezoFrequencyHz_ = frequencyHz;
 }
 
-void YapplApp::allocateRecordingBuffer() {
-  // This is a temporary local recording buffer for Listening. It is not
-  // persistent and is not uploaded yet.
-  if (recordingBuffer_ != nullptr || AppConfig::recordingBufferBytes == 0) {
-    return;
+void YapplApp::resetAudioStream() {
+  // A new Listening session must start with a clean backend lifecycle. If a
+  // stale finish flag survives from a previous session, the next session can be
+  // created and immediately finalized, producing a tiny MP3 at the start.
+  pendingBackendSessionStart_ = false;
+  pendingBackendSessionFinish_ = false;
+  pendingBackendYapCompleted_ = false;
+  pendingBackendYapCompletedEpoch_ = 0;
+  audioCaptureActive_ = false;
+  recordedBytes_ = 0;
+  droppedAudioChunks_ = 0;
+  activeBackendSessionId_ = "";
+  if (audioUploadQueue_ != nullptr) {
+    xQueueReset(audioUploadQueue_);
   }
-
-  // Prefer PSRAM so normal internal RAM stays available for tasks and drivers.
-  recordingBuffer_ = static_cast<int32_t *>(
-      heap_caps_malloc(AppConfig::recordingBufferBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (recordingBuffer_ == nullptr) {
-    // Current board config reports no PSRAM, so this is expected unless the
-    // board/env is changed later.
-    Serial.println(F("PSRAM recording buffer unavailable"));
-    recordingCapacitySamples_ = 0;
-    return;
-  }
-
-  recordingCapacitySamples_ = AppConfig::recordingBufferBytes / sizeof(recordingBuffer_[0]);
-  Serial.printf("PSRAM recording buffer ready: %u bytes\n", static_cast<unsigned>(AppConfig::recordingBufferBytes));
 }
 
-void YapplApp::resetRecording() {
-  // Reuse the same allocated buffer; just start writing from the beginning.
-  recordedSamples_ = 0;
+void YapplApp::queueAudioSamples(const int32_t *samples, size_t sampleCount) {
+  if (audioUploadQueue_ == nullptr || samples == nullptr || sampleCount == 0) {
+    return;
+  }
+
+  AudioUploadChunk chunk;
+  const size_t toCopy = std::min(sampleCount, AppConfig::audioUploadChunkSamples);
+  chunk.byteCount = toCopy * sizeof(chunk.samples[0]);
+
+  for (size_t i = 0; i < toCopy; ++i) {
+    // INMP441 has 24 useful signed bits in a 32-bit slot. Shift into 24-bit
+    // range, then down to signed 16-bit PCM for compact upload/storage.
+    const int32_t sample24 = samples[i] >> kInmp441SlotShift;
+    chunk.samples[i] = static_cast<int16_t>(constrain(sample24 >> 8, -32768, 32767));
+  }
+
+  if (xQueueSend(audioUploadQueue_, &chunk, 0) == pdPASS) {
+    recordedBytes_ += chunk.byteCount;
+  } else {
+    ++droppedAudioChunks_;
+  }
 }
 
-void YapplApp::appendRecordingSamples(const int32_t *samples, size_t sampleCount) {
-  // If no PSRAM buffer exists, Listening still works visually but does not store
-  // the raw mic stream.
-  if (recordingBuffer_ == nullptr || samples == nullptr || sampleCount == 0) {
-    return;
+bool YapplApp::popAudioChunk(AudioUploadChunk &chunk) {
+  if (audioUploadQueue_ == nullptr) {
+    return false;
   }
-
-  // Clamp to the remaining buffer space so recording cannot write past the end.
-  const size_t available = recordingCapacitySamples_ - std::min(recordedSamples_, recordingCapacitySamples_);
-  const size_t toCopy = std::min(sampleCount, available);
-  if (toCopy == 0) {
-    return;
-  }
-
-  // Store raw 32-bit I2S slots for now. A later upload path can convert/compress
-  // these into a real audio format.
-  memcpy(recordingBuffer_ + recordedSamples_, samples, toCopy * sizeof(samples[0]));
-  recordedSamples_ += toCopy;
+  return xQueueReceive(audioUploadQueue_, &chunk, 0) == pdPASS;
 }
 
 uint8_t YapplApp::micLevelFromSamples(const int32_t *samples, size_t sampleCount) const {
@@ -321,13 +322,16 @@ void YapplApp::outputTask() {
     const AppState snapshot = stateSnapshot();
 
     // Decide if the product state should change. YapplApp reacts only to the
-    // transition side effects it owns, such as clearing the recording buffer.
+    // transition side effects it owns, such as starting/stopping audio upload.
     TimeContext time = currentTimeContext();
     const bool modeChanged = stateController_.update(nowMs, snapshot, time);
     const AppMode mode = stateController_.mode();
     if (modeChanged) {
       if (mode == AppMode::Listening) {
-        resetRecording();
+        resetAudioStream();
+        pendingBackendSessionStart_ = true;
+        audioCaptureActive_ = true;
+        Serial.println(F("Audio session capture armed"));
       }
       Serial.printf("Mode -> %s\n", StateController::modeName(mode));
     }
@@ -343,6 +347,11 @@ void YapplApp::outputTask() {
       sessionCompletedThisBoot_ = true;
       pendingBackendYapCompleted_ = true;
       pendingBackendYapCompletedEpoch_ = time.valid ? time.nowEpoch : 0;
+      pendingBackendSessionFinish_ = true;
+      audioCaptureActive_ = false;
+      Serial.printf("Audio session finish requested, queued=%u dropped=%u\n",
+                    audioUploadQueue_ != nullptr ? static_cast<unsigned>(uxQueueMessagesWaiting(audioUploadQueue_)) : 0,
+                    static_cast<unsigned>(droppedAudioChunks_));
       if (time.valid) {
         pendingLastYapSave_ = !yapHistory_.saveLastYapEpoch(time.nowEpoch);
         time = currentTimeContext();
@@ -373,7 +382,7 @@ void YapplApp::outputTask() {
                        time.minute,
                        ledBrightness,
                        piezoFrequencyHz,
-                       recordedSamples_ * sizeof(int32_t));
+                       recordedBytes_);
 
     // Keep a steady task cadence even if one iteration runs a little late.
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(AppConfig::outputTaskPeriodMs));
@@ -395,12 +404,12 @@ void YapplApp::sensorTask() {
 
     if (micReady_) {
       // Read raw mic samples once per sensor tick. During Listening the same
-      // samples are also appended to the temporary recording buffer.
+      // samples are also queued for backend upload as 16-bit PCM.
       const size_t samplesRead = mic_.read(micSamples_, AppConfig::micSampleCount);
       if (samplesRead > 0) {
         micLevel = micLevelFromSamples(micSamples_, samplesRead);
-        if (stateSnapshot().mode == AppMode::Listening) {
-          appendRecordingSamples(micSamples_, samplesRead);
+        if (audioCaptureActive_) {
+          queueAudioSamples(micSamples_, samplesRead);
         }
       }
     }
@@ -461,7 +470,42 @@ void YapplApp::networkTask() {
     bool connected = backendConnected_;
 
     if (backendReady_ && wifi_.isConnected()) {
-      if (pendingBackendYapCompleted_) {
+      if (pendingBackendSessionStart_) {
+        const TimeContext time = currentTimeContext();
+        activeBackendSessionId_ = backend_.startAudioSession(time.valid ? time.nowEpoch : 0, AppConfig::sampleRateHz);
+        pendingBackendSessionStart_ = activeBackendSessionId_.length() == 0;
+        connected = activeBackendSessionId_.length() > 0 || connected;
+        if (activeBackendSessionId_.length() > 0) {
+          Serial.printf("Audio session started: %s\n", activeBackendSessionId_.c_str());
+        }
+      }
+
+      AudioUploadChunk chunk;
+      uint8_t chunksUploadedThisPass = 0;
+      while (activeBackendSessionId_.length() > 0 &&
+             chunksUploadedThisPass < AppConfig::audioUploadChunksPerNetworkPass &&
+             popAudioChunk(chunk)) {
+        connected = backend_.uploadAudioChunk(activeBackendSessionId_,
+                                              reinterpret_cast<const uint8_t *>(chunk.samples),
+                                              chunk.byteCount) ||
+                    connected;
+        ++chunksUploadedThisPass;
+      }
+
+      const bool audioQueueEmpty = audioUploadQueue_ == nullptr || uxQueueMessagesWaiting(audioUploadQueue_) == 0;
+      if (pendingBackendSessionFinish_ && activeBackendSessionId_.length() > 0 && audioQueueEmpty) {
+        if (backend_.finishAudioSession(activeBackendSessionId_, pendingBackendYapCompletedEpoch_)) {
+          Serial.printf("Audio session finished: %s bytes=%u dropped=%u\n",
+                        activeBackendSessionId_.c_str(),
+                        static_cast<unsigned>(recordedBytes_),
+                        static_cast<unsigned>(droppedAudioChunks_));
+          pendingBackendSessionFinish_ = false;
+          activeBackendSessionId_ = "";
+          connected = true;
+        }
+      }
+
+      if (pendingBackendYapCompleted_ && !pendingBackendSessionFinish_) {
         if (backend_.sendYapCompleted(pendingBackendYapCompletedEpoch_)) {
           pendingBackendYapCompleted_ = false;
           connected = true;

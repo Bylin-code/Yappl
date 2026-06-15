@@ -6,9 +6,10 @@ class Settings(BaseSettings):
 
     yappl_env: str = "local"
     yappl_device_secret: str = "local_dev_secret"
+    yappl_storage_dir: str = "/data"
+    yappl_mp3_bitrate: str = "64k"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 settings = Settings()
-

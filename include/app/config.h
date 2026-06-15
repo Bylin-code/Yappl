@@ -15,6 +15,12 @@ struct AppConfig {
   // about 16 ms of audio. Larger values smooth the meter but block longer.
   static constexpr size_t micSampleCount = 256;
 
+  // Audio uploaded to the backend is converted from INMP441 32-bit I2S slots
+  // into signed 16-bit mono PCM chunks. This keeps upload size smaller than raw
+  // 32-bit slots and is enough for speech experiments.
+  static constexpr size_t audioUploadChunkSamples = micSampleCount;
+  static constexpr size_t audioUploadQueueLength = 12;
+
   // Simple mic meter scaling. Values below noiseFloor are treated as silence;
   // noiseCeiling maps to 100%. This is not calibrated SPL.
   static constexpr int noiseFloor = 0;
@@ -72,9 +78,13 @@ struct AppConfig {
   // How often the device asks the backend for device status.
   static constexpr uint32_t backendStatusPeriodMs = 30000;
 
-  // Network task cadence. The task wakes often enough to send completion events
-  // quickly, but actual HTTP calls are rate-limited by the periods above.
-  static constexpr uint32_t networkTaskPeriodMs = 1000;
+  // Network task cadence. Audio upload is still HTTP-per-chunk, so this needs
+  // to be much faster than once per second or recordings become very short.
+  static constexpr uint32_t networkTaskPeriodMs = 100;
+
+  // Limit each network task pass so a burst of queued audio cannot starve
+  // status pings forever. Increase if LAN uploads cannot keep up.
+  static constexpr uint8_t audioUploadChunksPerNetworkPass = 8;
 
   // How long boot should wait for Wi-Fi before continuing local behavior.
   // If Wi-Fi fails, Yappl still runs the current local routine.
@@ -162,10 +172,6 @@ struct AppConfig {
   static constexpr uint32_t reminderDarkBreathMs = 1000;
   static constexpr uint32_t reminderDarkOffMs = 500;
   static constexpr uint32_t reminderDarkFlashMs = 90;
-
-  // Attempted PSRAM recording capacity for Listening. If this board has no
-  // PSRAM, allocation fails cleanly and recording is skipped.
-  static constexpr size_t recordingBufferBytes = 256 * 1024;
 
   // FreeRTOS stack sizes and priorities. Larger priority number wins.
   // Increase a stack size if logs show stack overflow or task crashes.

@@ -40,8 +40,8 @@ struct AppState {
   uint8_t ledBrightness = 0;
   uint16_t piezoFrequencyHz = 0;
 
-  // Number of bytes captured into the temporary in-RAM/PSRAM recording buffer.
-  // This is diagnostic only until upload/storage exists.
+  // Number of PCM audio bytes queued for backend upload during this session.
+  // It is diagnostic only; the backend is the source of truth for saved bytes.
   size_t recordedBytes = 0;
 };
 

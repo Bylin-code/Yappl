@@ -114,6 +114,96 @@ bool BackendClient::sendYapCompleted(uint64_t completedAtEpoch) {
   return ok;
 }
 
+String BackendClient::startAudioSession(uint64_t startedAtEpoch, uint32_t sampleRateHz) {
+  if (!configured_) {
+    return "";
+  }
+
+  HTTPClient http;
+  http.setTimeout(AppConfig::backendHttpTimeoutMs);
+  if (!http.begin(urlFor("/device/session/start"))) {
+    Serial.println(F("Backend session start failed: bad URL"));
+    return "";
+  }
+
+  http.addHeader("Content-Type", "application/json");
+  addAuthHeader(http);
+
+  String body = "{";
+  body += "\"device_id\":\"" + deviceId_ + "\",";
+  body += "\"sample_rate_hz\":" + String(sampleRateHz) + ",";
+  body += "\"sample_format\":\"pcm_s16le\",";
+  body += "\"started_at_epoch\":" + String(static_cast<unsigned long long>(startedAtEpoch));
+  body += "}";
+
+  const int code = http.POST(body);
+  const String response = http.getString();
+  http.end();
+
+  const bool ok = code >= 200 && code < 300;
+  const String sessionId = ok ? jsonStringValue(response, "session_id") : "";
+  Serial.printf("Backend session start %s: HTTP %d session=%s\n",
+                ok && sessionId.length() > 0 ? "OK" : "failed",
+                code,
+                sessionId.c_str());
+  return sessionId;
+}
+
+bool BackendClient::uploadAudioChunk(const String &sessionId, const uint8_t *data, size_t byteCount) {
+  if (!configured_ || sessionId.length() == 0 || data == nullptr || byteCount == 0) {
+    return false;
+  }
+
+  HTTPClient http;
+  http.setTimeout(AppConfig::backendHttpTimeoutMs);
+  const String path = "/device/session/audio?session_id=" + sessionId;
+  if (!http.begin(urlFor(path.c_str()))) {
+    Serial.println(F("Backend audio upload failed: bad URL"));
+    return false;
+  }
+
+  http.addHeader("Content-Type", "application/octet-stream");
+  addAuthHeader(http);
+
+  const int code = http.POST(const_cast<uint8_t *>(data), byteCount);
+  http.end();
+
+  const bool ok = code >= 200 && code < 300;
+  if (!ok) {
+    Serial.printf("Backend audio upload failed: HTTP %d bytes=%u\n", code, static_cast<unsigned>(byteCount));
+  }
+  return ok;
+}
+
+bool BackendClient::finishAudioSession(const String &sessionId, uint64_t completedAtEpoch) {
+  if (!configured_ || sessionId.length() == 0) {
+    return false;
+  }
+
+  HTTPClient http;
+  http.setTimeout(AppConfig::backendHttpTimeoutMs);
+  if (!http.begin(urlFor("/device/session/finish"))) {
+    Serial.println(F("Backend session finish failed: bad URL"));
+    return false;
+  }
+
+  http.addHeader("Content-Type", "application/json");
+  addAuthHeader(http);
+
+  String body = "{";
+  body += "\"device_id\":\"" + deviceId_ + "\",";
+  body += "\"session_id\":\"" + sessionId + "\",";
+  body += "\"completed_at_epoch\":" + String(static_cast<unsigned long long>(completedAtEpoch));
+  body += "}";
+
+  const int code = http.POST(body);
+  http.end();
+
+  const bool ok = code >= 200 && code < 300;
+  Serial.printf("Backend session finish %s: HTTP %d session=%s\n", ok ? "OK" : "failed", code, sessionId.c_str());
+  return ok;
+}
+
 BackendStatus BackendClient::fetchStatus() {
   BackendStatus status;
   if (!configured_) {
@@ -151,6 +241,32 @@ void BackendClient::addAuthHeader(HTTPClient &http) const {
   http.addHeader("Authorization", "Bearer " + deviceSecret_);
 }
 
+String BackendClient::jsonStringValue(const String &body, const char *fieldName) const {
+  // Tiny parser for simple backend responses. We can replace this with a JSON
+  // library if responses become nested or complex.
+  const String key = "\"" + String(fieldName) + "\"";
+  int index = body.indexOf(key);
+  if (index < 0) {
+    return "";
+  }
+
+  index = body.indexOf(':', index);
+  if (index < 0) {
+    return "";
+  }
+
+  index = body.indexOf('"', index);
+  if (index < 0) {
+    return "";
+  }
+  const int start = index + 1;
+  const int end = body.indexOf('"', start);
+  if (end < 0) {
+    return "";
+  }
+  return body.substring(start, end);
+}
+
 bool BackendClient::responseHasTrue(const String &body, const char *fieldName) const {
   const String pattern = "\"" + String(fieldName) + "\":true";
   String compact = body;
@@ -162,4 +278,3 @@ bool BackendClient::responseHasTrue(const String &body, const char *fieldName) c
 }
 
 }  // namespace yappl
-

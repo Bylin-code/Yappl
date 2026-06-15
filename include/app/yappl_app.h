@@ -2,10 +2,12 @@
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
 #include "app/app_state.h"
+#include "app/config.h"
 #include "app/state_controller.h"
 #include "drivers/button.h"
 #include "drivers/inmp441_microphone.h"
@@ -20,6 +22,11 @@
 #include "storage/yap_history_store.h"
 
 namespace yappl {
+
+struct AudioUploadChunk {
+  size_t byteCount = 0;
+  int16_t samples[AppConfig::audioUploadChunkSamples] = {};
+};
 
 // Top-level coordinator. It initializes hardware, owns the shared AppState, and
 // starts the RTOS tasks. Hardware details live in drivers; behavior details live
@@ -48,10 +55,10 @@ class YapplApp {
 
   // Scratch buffer for mic reads. Kept as a member so it does not consume task
   // stack every time the sensor task runs.
-  int32_t micSamples_[256] = {};
-  int32_t *recordingBuffer_ = nullptr;
-  size_t recordingCapacitySamples_ = 0;
-  size_t recordedSamples_ = 0;
+  int32_t micSamples_[AppConfig::micSampleCount] = {};
+  QueueHandle_t audioUploadQueue_ = nullptr;
+  size_t recordedBytes_ = 0;
+  size_t droppedAudioChunks_ = 0;
 
   // Shared state and RTOS handles.
   AppState state_;
@@ -69,6 +76,10 @@ class YapplApp {
   bool pendingLastYapSave_ = false;
   bool pendingBackendYapCompleted_ = false;
   uint64_t pendingBackendYapCompletedEpoch_ = 0;
+  bool pendingBackendSessionStart_ = false;
+  bool pendingBackendSessionFinish_ = false;
+  bool audioCaptureActive_ = false;
+  String activeBackendSessionId_;
   uint8_t lastLedBrightness_ = 0;
   uint16_t currentPiezoFrequencyHz_ = 0;
 
@@ -81,11 +92,11 @@ class YapplApp {
   void setLedBrightness(uint8_t brightness);
   void setPiezoFrequency(uint16_t frequencyHz);
 
-  // Temporary local recording support. This stores raw I2S slots during
-  // Listening; it does not upload or persist yet.
-  void allocateRecordingBuffer();
-  void resetRecording();
-  void appendRecordingSamples(const int32_t *samples, size_t sampleCount);
+  // Backend audio streaming support. The sensor task queues converted PCM
+  // chunks; the network task uploads them.
+  void resetAudioStream();
+  void queueAudioSamples(const int32_t *samples, size_t sampleCount);
+  bool popAudioChunk(AudioUploadChunk &chunk);
   uint8_t micLevelFromSamples(const int32_t *samples, size_t sampleCount) const;
 
   // State helpers always take/release the mutex internally. Callers should copy
