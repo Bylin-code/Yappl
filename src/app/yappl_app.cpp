@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include <esp_heap_caps.h>
+
 #include "app/config.h"
 #include "app/output_patterns.h"
 
@@ -61,12 +63,7 @@ void YapplApp::begin() {
     button_.begin();
   }
 
-  // Audio upload uses a fixed FreeRTOS queue instead of a large recording
-  // buffer. This board has no PSRAM, so streaming chunks is more realistic.
-  audioUploadQueue_ = xQueueCreate(AppConfig::audioUploadQueueLength, sizeof(AudioUploadChunk));
-  if (audioUploadQueue_ == nullptr) {
-    Serial.println(F("Failed to create audio upload queue"));
-  }
+  allocateAudioBuffers();
 
   // Seed AppState with enough data for display/output tasks to start cleanly.
   const int lightRaw = AppConfig::enablePhotoresistor ? photoresistor_.readRaw() : 0;
@@ -188,6 +185,32 @@ void YapplApp::setPiezoFrequency(uint16_t frequencyHz) {
   currentPiezoFrequencyHz_ = frequencyHz;
 }
 
+void YapplApp::allocateAudioBuffers() {
+  if (audioRingBuffer_ != nullptr && audioUploadBatch_ != nullptr) {
+    return;
+  }
+
+  audioRingBuffer_ = static_cast<uint8_t *>(
+      heap_caps_malloc(AppConfig::audioRollingBufferBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (audioRingBuffer_ == nullptr) {
+    audioRingBuffer_ = static_cast<uint8_t *>(
+        heap_caps_malloc(AppConfig::audioRollingBufferBytes, MALLOC_CAP_8BIT));
+  }
+
+  audioUploadBatch_ = static_cast<uint8_t *>(
+      heap_caps_malloc(AppConfig::audioUploadBatchBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (audioUploadBatch_ == nullptr) {
+    audioUploadBatch_ = static_cast<uint8_t *>(
+        heap_caps_malloc(AppConfig::audioUploadBatchBytes, MALLOC_CAP_8BIT));
+  }
+
+  Serial.printf("Audio rolling buffer: %s (%u bytes), upload batch: %s (%u bytes)\n",
+                audioRingBuffer_ != nullptr ? "ready" : "failed",
+                static_cast<unsigned>(AppConfig::audioRollingBufferBytes),
+                audioUploadBatch_ != nullptr ? "ready" : "failed",
+                static_cast<unsigned>(AppConfig::audioUploadBatchBytes));
+}
+
 void YapplApp::resetAudioStream() {
   // A new Listening session must start with a clean backend lifecycle. If a
   // stale finish flag survives from a previous session, the next session can be
@@ -198,41 +221,66 @@ void YapplApp::resetAudioStream() {
   pendingBackendYapCompletedEpoch_ = 0;
   audioCaptureActive_ = false;
   recordedBytes_ = 0;
-  droppedAudioChunks_ = 0;
+  droppedAudioBytes_ = 0;
   activeBackendSessionId_ = "";
-  if (audioUploadQueue_ != nullptr) {
-    xQueueReset(audioUploadQueue_);
-  }
+  portENTER_CRITICAL(&audioRingMux_);
+  audioRingWriteIndex_ = 0;
+  audioRingReadIndex_ = 0;
+  audioRingBytesUsed_ = 0;
+  portEXIT_CRITICAL(&audioRingMux_);
 }
 
-void YapplApp::queueAudioSamples(const int32_t *samples, size_t sampleCount) {
-  if (audioUploadQueue_ == nullptr || samples == nullptr || sampleCount == 0) {
+void YapplApp::pushAudioSamples(const int32_t *samples, size_t sampleCount) {
+  if (audioRingBuffer_ == nullptr || samples == nullptr || sampleCount == 0) {
     return;
   }
 
-  AudioUploadChunk chunk;
-  const size_t toCopy = std::min(sampleCount, AppConfig::audioUploadChunkSamples);
-  chunk.byteCount = toCopy * sizeof(chunk.samples[0]);
-
-  for (size_t i = 0; i < toCopy; ++i) {
+  int16_t pcmSamples[AppConfig::micSampleCount] = {};
+  const size_t samplesToCopy = std::min(sampleCount, AppConfig::micSampleCount);
+  for (size_t i = 0; i < samplesToCopy; ++i) {
     // INMP441 has 24 useful signed bits in a 32-bit slot. Shift into 24-bit
-    // range, then down to signed 16-bit PCM for compact upload/storage.
+    // range, then down to signed 16-bit PCM for compact upload/storage. Apply a
+    // small configurable gain because bedside speech is otherwise quiet.
     const int32_t sample24 = samples[i] >> kInmp441SlotShift;
-    chunk.samples[i] = static_cast<int16_t>(constrain(sample24 >> 8, -32768, 32767));
+    const int32_t sample16 = (sample24 >> 8) * AppConfig::audioUploadGain;
+    pcmSamples[i] = static_cast<int16_t>(constrain(sample16, -32768, 32767));
   }
 
-  if (xQueueSend(audioUploadQueue_, &chunk, 0) == pdPASS) {
-    recordedBytes_ += chunk.byteCount;
-  } else {
-    ++droppedAudioChunks_;
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(pcmSamples);
+  const size_t byteCount = samplesToCopy * sizeof(pcmSamples[0]);
+
+  portENTER_CRITICAL(&audioRingMux_);
+  for (size_t i = 0; i < byteCount; ++i) {
+    if (audioRingBytesUsed_ == AppConfig::audioRollingBufferBytes) {
+      // Rolling buffer policy: discard oldest bytes so the newest live audio is
+      // retained for future real-time inference.
+      audioRingReadIndex_ = (audioRingReadIndex_ + 1) % AppConfig::audioRollingBufferBytes;
+      --audioRingBytesUsed_;
+      ++droppedAudioBytes_;
+    }
+
+    audioRingBuffer_[audioRingWriteIndex_] = bytes[i];
+    audioRingWriteIndex_ = (audioRingWriteIndex_ + 1) % AppConfig::audioRollingBufferBytes;
+    ++audioRingBytesUsed_;
   }
+  recordedBytes_ += byteCount;
+  portEXIT_CRITICAL(&audioRingMux_);
 }
 
-bool YapplApp::popAudioChunk(AudioUploadChunk &chunk) {
-  if (audioUploadQueue_ == nullptr) {
-    return false;
+size_t YapplApp::popAudioBatch(uint8_t *destination, size_t maxBytes) {
+  if (audioRingBuffer_ == nullptr || destination == nullptr || maxBytes == 0) {
+    return 0;
   }
-  return xQueueReceive(audioUploadQueue_, &chunk, 0) == pdPASS;
+
+  portENTER_CRITICAL(&audioRingMux_);
+  const size_t toRead = std::min(maxBytes, audioRingBytesUsed_);
+  for (size_t i = 0; i < toRead; ++i) {
+    destination[i] = audioRingBuffer_[audioRingReadIndex_];
+    audioRingReadIndex_ = (audioRingReadIndex_ + 1) % AppConfig::audioRollingBufferBytes;
+  }
+  audioRingBytesUsed_ -= toRead;
+  portEXIT_CRITICAL(&audioRingMux_);
+  return toRead;
 }
 
 uint8_t YapplApp::micLevelFromSamples(const int32_t *samples, size_t sampleCount) const {
@@ -349,9 +397,13 @@ void YapplApp::outputTask() {
       pendingBackendYapCompletedEpoch_ = time.valid ? time.nowEpoch : 0;
       pendingBackendSessionFinish_ = true;
       audioCaptureActive_ = false;
-      Serial.printf("Audio session finish requested, queued=%u dropped=%u\n",
-                    audioUploadQueue_ != nullptr ? static_cast<unsigned>(uxQueueMessagesWaiting(audioUploadQueue_)) : 0,
-                    static_cast<unsigned>(droppedAudioChunks_));
+      size_t bufferedBytes = 0;
+      portENTER_CRITICAL(&audioRingMux_);
+      bufferedBytes = audioRingBytesUsed_;
+      portEXIT_CRITICAL(&audioRingMux_);
+      Serial.printf("Audio session finish requested, buffered=%u dropped=%u\n",
+                    static_cast<unsigned>(bufferedBytes),
+                    static_cast<unsigned>(droppedAudioBytes_));
       if (time.valid) {
         pendingLastYapSave_ = !yapHistory_.saveLastYapEpoch(time.nowEpoch);
         time = currentTimeContext();
@@ -409,7 +461,7 @@ void YapplApp::sensorTask() {
       if (samplesRead > 0) {
         micLevel = micLevelFromSamples(micSamples_, samplesRead);
         if (audioCaptureActive_) {
-          queueAudioSamples(micSamples_, samplesRead);
+          pushAudioSamples(micSamples_, samplesRead);
         }
       }
     }
@@ -480,25 +532,31 @@ void YapplApp::networkTask() {
         }
       }
 
-      AudioUploadChunk chunk;
-      uint8_t chunksUploadedThisPass = 0;
+      uint8_t batchesUploadedThisPass = 0;
       while (activeBackendSessionId_.length() > 0 &&
-             chunksUploadedThisPass < AppConfig::audioUploadChunksPerNetworkPass &&
-             popAudioChunk(chunk)) {
+             audioUploadBatch_ != nullptr &&
+             batchesUploadedThisPass < AppConfig::audioUploadBatchesPerNetworkPass) {
+        const size_t batchBytes = popAudioBatch(audioUploadBatch_, AppConfig::audioUploadBatchBytes);
+        if (batchBytes == 0) {
+          break;
+        }
         connected = backend_.uploadAudioChunk(activeBackendSessionId_,
-                                              reinterpret_cast<const uint8_t *>(chunk.samples),
-                                              chunk.byteCount) ||
+                                              audioUploadBatch_,
+                                              batchBytes) ||
                     connected;
-        ++chunksUploadedThisPass;
+        ++batchesUploadedThisPass;
       }
 
-      const bool audioQueueEmpty = audioUploadQueue_ == nullptr || uxQueueMessagesWaiting(audioUploadQueue_) == 0;
-      if (pendingBackendSessionFinish_ && activeBackendSessionId_.length() > 0 && audioQueueEmpty) {
+      size_t bufferedBytes = 0;
+      portENTER_CRITICAL(&audioRingMux_);
+      bufferedBytes = audioRingBytesUsed_;
+      portEXIT_CRITICAL(&audioRingMux_);
+      if (pendingBackendSessionFinish_ && activeBackendSessionId_.length() > 0 && bufferedBytes == 0) {
         if (backend_.finishAudioSession(activeBackendSessionId_, pendingBackendYapCompletedEpoch_)) {
           Serial.printf("Audio session finished: %s bytes=%u dropped=%u\n",
                         activeBackendSessionId_.c_str(),
                         static_cast<unsigned>(recordedBytes_),
-                        static_cast<unsigned>(droppedAudioChunks_));
+                        static_cast<unsigned>(droppedAudioBytes_));
           pendingBackendSessionFinish_ = false;
           activeBackendSessionId_ = "";
           connected = true;

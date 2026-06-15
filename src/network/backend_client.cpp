@@ -23,8 +23,26 @@
 namespace yappl {
 namespace {
 
+#if defined(YAPPL_BACKEND_BASE_URLS)
+const char *const kBackendBaseUrls[] = YAPPL_BACKEND_BASE_URLS;
+#else
+const char *const kBackendBaseUrls[] = {
+    YAPPL_BACKEND_BASE_URL,
+};
+#endif
+
+constexpr size_t kBackendBaseUrlCount = sizeof(kBackendBaseUrls) / sizeof(kBackendBaseUrls[0]);
+
 bool stringLooksConfigured(const char *value) {
   return value != nullptr && value[0] != '\0';
+}
+
+String normalizedBaseUrl(const char *value) {
+  String url = value;
+  while (url.endsWith("/")) {
+    url.remove(url.length() - 1);
+  }
+  return url;
 }
 
 }  // namespace
@@ -35,21 +53,33 @@ bool BackendClient::begin() {
     return false;
   }
 
-  configured_ = stringLooksConfigured(YAPPL_BACKEND_BASE_URL) &&
-                stringLooksConfigured(YAPPL_DEVICE_ID) &&
+  configured_ = stringLooksConfigured(YAPPL_DEVICE_ID) &&
                 stringLooksConfigured(YAPPL_DEVICE_SECRET);
+  bool hasBackendUrl = false;
+  for (const char *url : kBackendBaseUrls) {
+    if (stringLooksConfigured(url)) {
+      hasBackendUrl = true;
+      break;
+    }
+  }
+  configured_ = configured_ && hasBackendUrl;
   if (!configured_) {
-    Serial.println(F("Backend not configured. Set YAPPL_BACKEND_BASE_URL in include/secrets.h."));
+    Serial.println(F("Backend not configured. Set YAPPL_BACKEND_BASE_URLS or YAPPL_BACKEND_BASE_URL in include/secrets.h."));
     return false;
   }
 
-  baseUrl_ = YAPPL_BACKEND_BASE_URL;
   deviceId_ = YAPPL_DEVICE_ID;
   deviceSecret_ = YAPPL_DEVICE_SECRET;
 
-  // Avoid accidental double slashes when paths are appended.
-  while (baseUrl_.endsWith("/")) {
-    baseUrl_.remove(baseUrl_.length() - 1);
+  if (!selectInitialBackend()) {
+    Serial.println(F("No backend responded during startup; using first configured backend."));
+    for (size_t i = 0; i < kBackendBaseUrlCount; ++i) {
+      if (stringLooksConfigured(kBackendBaseUrls[i])) {
+        backendIndex_ = i;
+        baseUrl_ = normalizedBaseUrl(kBackendBaseUrls[i]);
+        break;
+      }
+    }
   }
 
   Serial.printf("Backend configured: %s\n", baseUrl_.c_str());
@@ -82,8 +112,8 @@ bool BackendClient::ping(bool wifiConnected, bool timeSynced, const char *modeNa
   http.end();
 
   const bool ok = code >= 200 && code < 300;
-  Serial.printf("Backend ping %s: HTTP %d\n", ok ? "OK" : "failed", code);
-  return ok;
+  Serial.printf("Backend ping %s: HTTP %d url=%s\n", ok ? "OK" : "failed", code, baseUrl_.c_str());
+  return markRequestResult(ok);
 }
 
 bool BackendClient::sendYapCompleted(uint64_t completedAtEpoch) {
@@ -111,7 +141,7 @@ bool BackendClient::sendYapCompleted(uint64_t completedAtEpoch) {
 
   const bool ok = code >= 200 && code < 300;
   Serial.printf("Backend yap-completed %s: HTTP %d\n", ok ? "OK" : "failed", code);
-  return ok;
+  return markRequestResult(ok);
 }
 
 String BackendClient::startAudioSession(uint64_t startedAtEpoch, uint32_t sampleRateHz) {
@@ -146,6 +176,7 @@ String BackendClient::startAudioSession(uint64_t startedAtEpoch, uint32_t sample
                 ok && sessionId.length() > 0 ? "OK" : "failed",
                 code,
                 sessionId.c_str());
+  markRequestResult(ok && sessionId.length() > 0);
   return sessionId;
 }
 
@@ -172,7 +203,7 @@ bool BackendClient::uploadAudioChunk(const String &sessionId, const uint8_t *dat
   if (!ok) {
     Serial.printf("Backend audio upload failed: HTTP %d bytes=%u\n", code, static_cast<unsigned>(byteCount));
   }
-  return ok;
+  return markRequestResult(ok);
 }
 
 bool BackendClient::finishAudioSession(const String &sessionId, uint64_t completedAtEpoch) {
@@ -201,7 +232,7 @@ bool BackendClient::finishAudioSession(const String &sessionId, uint64_t complet
 
   const bool ok = code >= 200 && code < 300;
   Serial.printf("Backend session finish %s: HTTP %d session=%s\n", ok ? "OK" : "failed", code, sessionId.c_str());
-  return ok;
+  return markRequestResult(ok);
 }
 
 BackendStatus BackendClient::fetchStatus() {
@@ -230,7 +261,62 @@ BackendStatus BackendClient::fetchStatus() {
                 status.requestOk ? "OK" : "failed",
                 code,
                 status.hasYappedToday ? "true" : "false");
+  markRequestResult(status.requestOk);
   return status;
+}
+
+bool BackendClient::selectInitialBackend() {
+  for (size_t i = 0; i < kBackendBaseUrlCount; ++i) {
+    if (!stringLooksConfigured(kBackendBaseUrls[i])) {
+      continue;
+    }
+
+    const String candidate = normalizedBaseUrl(kBackendBaseUrls[i]);
+    Serial.printf("Checking backend: %s\n", candidate.c_str());
+    if (tryHealthCheck(candidate)) {
+      backendIndex_ = i;
+      baseUrl_ = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool BackendClient::tryHealthCheck(const String &baseUrl) const {
+  HTTPClient http;
+  http.setTimeout(AppConfig::backendHttpTimeoutMs);
+  if (!http.begin(baseUrl + "/health")) {
+    return false;
+  }
+
+  const int code = http.GET();
+  http.end();
+  return code >= 200 && code < 300;
+}
+
+bool BackendClient::markRequestResult(bool ok) {
+  if (!ok) {
+    moveToNextBackend();
+  }
+  return ok;
+}
+
+void BackendClient::moveToNextBackend() {
+  if (kBackendBaseUrlCount <= 1) {
+    return;
+  }
+
+  for (size_t offset = 1; offset <= kBackendBaseUrlCount; ++offset) {
+    const size_t nextIndex = (backendIndex_ + offset) % kBackendBaseUrlCount;
+    if (!stringLooksConfigured(kBackendBaseUrls[nextIndex])) {
+      continue;
+    }
+
+    backendIndex_ = nextIndex;
+    baseUrl_ = normalizedBaseUrl(kBackendBaseUrls[nextIndex]);
+    Serial.printf("Backend failover selected: %s\n", baseUrl_.c_str());
+    return;
+  }
 }
 
 String BackendClient::urlFor(const char *path) const {

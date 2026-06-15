@@ -16,10 +16,16 @@ struct AppConfig {
   static constexpr size_t micSampleCount = 256;
 
   // Audio uploaded to the backend is converted from INMP441 32-bit I2S slots
-  // into signed 16-bit mono PCM chunks. This keeps upload size smaller than raw
-  // 32-bit slots and is enough for speech experiments.
-  static constexpr size_t audioUploadChunkSamples = micSampleCount;
-  static constexpr size_t audioUploadQueueLength = 12;
+  // into signed 16-bit mono PCM. The mic task writes into a PSRAM rolling
+  // buffer; the network task drains 8 KB batches. At 16 kHz mono 16-bit, 8 KB
+  // is about 256 ms of audio and the 96 KB rolling buffer is about 3 seconds.
+  static constexpr size_t audioUploadBatchBytes = 8 * 1024;
+  static constexpr size_t audioRollingBufferBytes = 96 * 1024;
+
+  // Simple digital gain applied only to uploaded recording audio. INMP441
+  // speech at bedside distance can be quiet after converting 24-bit samples to
+  // 16-bit PCM, so this boosts before clipping into int16_t.
+  static constexpr int audioUploadGain = 4;
 
   // Simple mic meter scaling. Values below noiseFloor are treated as silence;
   // noiseCeiling maps to 100%. This is not calibrated SPL.
@@ -82,9 +88,10 @@ struct AppConfig {
   // to be much faster than once per second or recordings become very short.
   static constexpr uint32_t networkTaskPeriodMs = 100;
 
-  // Limit each network task pass so a burst of queued audio cannot starve
-  // status pings forever. Increase if LAN uploads cannot keep up.
-  static constexpr uint8_t audioUploadChunksPerNetworkPass = 8;
+  // Limit each network task pass so audio uploads do not starve status pings.
+  // Each batch is 8 KB, so one batch per 100 ms can move much faster than the
+  // 32 KB/sec produced by the mic while staying simple.
+  static constexpr uint8_t audioUploadBatchesPerNetworkPass = 1;
 
   // How long boot should wait for Wi-Fi before continuing local behavior.
   // If Wi-Fi fails, Yappl still runs the current local routine.
@@ -125,8 +132,10 @@ struct AppConfig {
   // Output task handles state transitions, LED, and piezo timing.
   static constexpr uint32_t outputTaskPeriodMs = 5;
 
-  // Sensor task reads button, photoresistor, and mic.
-  static constexpr uint32_t sensorTaskPeriodMs = 50;
+  // Sensor task reads button, photoresistor, and mic. 256 samples at 16 kHz is
+  // 16 ms of audio, so this period must be about 16 ms to avoid sped-up
+  // recordings caused by missing gaps between chunks.
+  static constexpr uint32_t sensorTaskPeriodMs = 16;
 
   // Display task sends full OLED frames. Larger is slower but more stable on
   // I2C; smaller is smoother but can stress the display/bus.

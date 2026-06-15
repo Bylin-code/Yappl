@@ -2,7 +2,6 @@
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
@@ -22,11 +21,6 @@
 #include "storage/yap_history_store.h"
 
 namespace yappl {
-
-struct AudioUploadChunk {
-  size_t byteCount = 0;
-  int16_t samples[AppConfig::audioUploadChunkSamples] = {};
-};
 
 // Top-level coordinator. It initializes hardware, owns the shared AppState, and
 // starts the RTOS tasks. Hardware details live in drivers; behavior details live
@@ -56,9 +50,14 @@ class YapplApp {
   // Scratch buffer for mic reads. Kept as a member so it does not consume task
   // stack every time the sensor task runs.
   int32_t micSamples_[AppConfig::micSampleCount] = {};
-  QueueHandle_t audioUploadQueue_ = nullptr;
+  uint8_t *audioRingBuffer_ = nullptr;
+  uint8_t *audioUploadBatch_ = nullptr;
+  portMUX_TYPE audioRingMux_ = portMUX_INITIALIZER_UNLOCKED;
+  size_t audioRingWriteIndex_ = 0;
+  size_t audioRingReadIndex_ = 0;
+  size_t audioRingBytesUsed_ = 0;
   size_t recordedBytes_ = 0;
-  size_t droppedAudioChunks_ = 0;
+  size_t droppedAudioBytes_ = 0;
 
   // Shared state and RTOS handles.
   AppState state_;
@@ -92,11 +91,12 @@ class YapplApp {
   void setLedBrightness(uint8_t brightness);
   void setPiezoFrequency(uint16_t frequencyHz);
 
-  // Backend audio streaming support. The sensor task queues converted PCM
-  // chunks; the network task uploads them.
+  // Backend audio streaming support. The sensor task writes converted PCM into
+  // a PSRAM rolling buffer; the network task uploads 8 KB batches.
+  void allocateAudioBuffers();
   void resetAudioStream();
-  void queueAudioSamples(const int32_t *samples, size_t sampleCount);
-  bool popAudioChunk(AudioUploadChunk &chunk);
+  void pushAudioSamples(const int32_t *samples, size_t sampleCount);
+  size_t popAudioBatch(uint8_t *destination, size_t maxBytes);
   uint8_t micLevelFromSamples(const int32_t *samples, size_t sampleCount) const;
 
   // State helpers always take/release the mutex internally. Callers should copy

@@ -28,12 +28,17 @@ class BackendClient {
   BackendStatus fetchStatus();
 
  private:
+  bool selectInitialBackend();
+  bool tryHealthCheck(const String &baseUrl) const;
+  bool markRequestResult(bool ok);
+  void moveToNextBackend();
   String urlFor(const char *path) const;
   void addAuthHeader(HTTPClient &http) const;
   String jsonStringValue(const String &body, const char *fieldName) const;
   bool responseHasTrue(const String &body, const char *fieldName) const;
 
   bool configured_ = false;
+  size_t backendIndex_ = 0;
   String baseUrl_;
   String deviceId_;
   String deviceSecret_;
