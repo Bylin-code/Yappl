@@ -69,7 +69,11 @@ def safe_device_id(device_id: str) -> str:
 
 
 def device_state_path(device_id: str) -> Path:
-    return storage_root() / "devices" / safe_device_id(device_id) / "state.json"
+    return device_root(device_id) / "state.json"
+
+
+def device_root(device_id: str) -> Path:
+    return storage_root() / "devices" / safe_device_id(device_id)
 
 
 def read_device_state(device_id: str) -> dict:
@@ -91,18 +95,37 @@ def write_device_state(device_id: str, state: dict) -> None:
     device_state[device_id] = state
 
 
-def sessions_root() -> Path:
-    root = storage_root() / "sessions"
+def device_sessions_root(device_id: str) -> Path:
+    root = device_root(device_id) / "sessions"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
-def latest_completed_session_for_device(device_id: str) -> dict | None:
-    """Find the newest completed session metadata for one device."""
-    latest: dict | None = None
-    latest_epoch = -1
+def legacy_sessions_root() -> Path:
+    return storage_root() / "sessions"
 
-    for path in sessions_root().glob("session_*/metadata.json"):
+
+def session_snapshot(metadata: dict) -> dict:
+    """Return the session fields that belong in a device state snapshot."""
+    return {
+        "session_id": metadata.get("session_id"),
+        "started_at": metadata.get("started_at"),
+        "started_at_epoch": metadata.get("started_at_epoch"),
+        "completed_at": metadata.get("completed_at"),
+        "completed_at_epoch": metadata.get("completed_at_epoch"),
+        "audio_bytes": metadata.get("audio_bytes", 0),
+        "mp3_status": metadata.get("mp3_status"),
+    }
+
+
+def sessions_for_device(device_id: str) -> list[dict]:
+    """Read actual session folders for one device from disk."""
+    sessions: list[dict] = []
+
+    metadata_paths = list(device_sessions_root(device_id).glob("session_*/metadata.json"))
+    metadata_paths.extend(legacy_sessions_root().glob("session_*/metadata.json"))
+
+    for path in metadata_paths:
         try:
             metadata = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
@@ -112,6 +135,24 @@ def latest_completed_session_for_device(device_id: str) -> dict | None:
         if metadata.get("device_id") != device_id:
             continue
 
+        sessions.append(metadata)
+
+    return sorted(
+        sessions,
+        key=lambda metadata: (
+            metadata.get("completed_at_epoch") or metadata.get("started_at_epoch") or 0,
+            metadata.get("started_at") or "",
+            metadata.get("session_id") or "",
+        ),
+    )
+
+
+def latest_completed_session(sessions: list[dict]) -> dict | None:
+    """Find the newest completed session metadata from a session list."""
+    latest: dict | None = None
+    latest_epoch = -1
+
+    for metadata in sessions:
         completed_epoch = metadata.get("completed_at_epoch")
         if not isinstance(completed_epoch, int) or completed_epoch <= 0:
             continue
@@ -125,8 +166,18 @@ def latest_completed_session_for_device(device_id: str) -> dict | None:
 
 def refresh_state_from_sessions(device_id: str, state: dict) -> dict:
     """Make session folders the ground truth for last-yap fields in state.json."""
-    latest = latest_completed_session_for_device(device_id)
+    sessions = sessions_for_device(device_id)
+    completed_sessions = [
+        session
+        for session in sessions
+        if isinstance(session.get("completed_at_epoch"), int) and session.get("completed_at_epoch") > 0
+    ]
+    latest = latest_completed_session(sessions)
     previous_epoch = state.get("last_yap_completed_at_epoch")
+
+    state["sessions"] = [session_snapshot(session) for session in sessions]
+    state["session_count"] = len(sessions)
+    state["completed_session_count"] = len(completed_sessions)
 
     if latest is None:
         if previous_epoch is not None:
@@ -136,6 +187,7 @@ def refresh_state_from_sessions(device_id: str, state: dict) -> dict:
         state.pop("last_yap_completed_at", None)
         state.pop("last_yap_completed_at_epoch", None)
         state.pop("last_session_id", None)
+        state["mode"] = "reminder"
         return state
 
     latest_epoch = latest["completed_at_epoch"]
@@ -155,22 +207,47 @@ def refresh_state_from_sessions(device_id: str, state: dict) -> dict:
     return state
 
 
+def device_status_payload(device_id: str, state: dict) -> dict:
+    """Return the device state fields firmware should sync from."""
+    return {
+        "device_id": device_id,
+        "last_seen_at": state.get("last_seen_at"),
+        "last_yap_completed_at": state.get("last_yap_completed_at"),
+        "last_yap_completed_at_epoch": state.get("last_yap_completed_at_epoch", 0),
+        "last_session_id": state.get("last_session_id"),
+        "mode": state.get("mode"),
+        "session_count": state.get("session_count", 0),
+        "completed_session_count": state.get("completed_session_count", 0),
+        "server_time": now_iso(),
+    }
+
+
+def session_dir_for_device(device_id: str, session_id: str) -> Path:
+    return device_sessions_root(device_id) / session_id
+
+
 def session_dir(session_id: str) -> Path:
-    return storage_root() / "sessions" / session_id
+    for path in (storage_root() / "devices").glob("*/sessions/session_*"):
+        if path.name == session_id:
+            return path
+    return legacy_sessions_root() / session_id
 
 
-def metadata_path(session_id: str) -> Path:
-    return session_dir(session_id) / "metadata.json"
+def metadata_path(session_id: str, device_id: str | None = None) -> Path:
+    folder = session_dir_for_device(device_id, session_id) if device_id is not None else session_dir(session_id)
+    return folder / "metadata.json"
 
 
-def audio_path(session_id: str) -> Path:
+def audio_path(session_id: str, device_id: str | None = None) -> Path:
     # Raw little-endian signed 16-bit mono PCM. This is easy for firmware to
     # upload and can later be converted to WAV/MP3 for playback/transcription.
-    return session_dir(session_id) / "audio.pcm_s16le"
+    folder = session_dir_for_device(device_id, session_id) if device_id is not None else session_dir(session_id)
+    return folder / "audio.pcm_s16le"
 
 
-def mp3_path(session_id: str) -> Path:
-    return session_dir(session_id) / "audio.mp3"
+def mp3_path(session_id: str, device_id: str | None = None) -> Path:
+    folder = session_dir_for_device(device_id, session_id) if device_id is not None else session_dir(session_id)
+    return folder / "audio.mp3"
 
 
 def read_metadata(session_id: str) -> dict:
@@ -181,9 +258,13 @@ def read_metadata(session_id: str) -> dict:
 
 
 def write_metadata(session_id: str, metadata: dict) -> None:
-    folder = session_dir(session_id)
+    device_id = metadata.get("device_id")
+    if not isinstance(device_id, str) or not device_id:
+        raise ValueError("metadata requires device_id")
+    existing_path = metadata_path(session_id)
+    folder = existing_path.parent if existing_path.exists() else session_dir_for_device(device_id, session_id)
     folder.mkdir(parents=True, exist_ok=True)
-    metadata_path(session_id).write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    (folder / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
 
 
 def convert_pcm_to_mp3(session_id: str, metadata: dict) -> dict:
@@ -257,13 +338,13 @@ def session_start(payload: SessionStart, authorization: str | None = Header(defa
         "completed_at": None,
         "completed_at_epoch": None,
         "audio_bytes": 0,
-        "audio_file": str(audio_path(session_id)),
+        "audio_file": str(audio_path(session_id, payload.device_id)),
         "mp3_status": "not_created",
         "mp3_file": None,
         "mp3_bytes": 0,
     }
     write_metadata(session_id, metadata)
-    audio_path(session_id).write_bytes(b"")
+    audio_path(session_id, payload.device_id).write_bytes(b"")
 
     print("session started:", payload.device_id, session_id, flush=True)
     return {
@@ -390,7 +471,7 @@ def device_ping(payload: DevicePing, authorization: str | None = Header(default=
 
     return {
         "status": "ok",
-        "server_time": now_iso(),
+        **device_status_payload(payload.device_id, state),
     }
 
 
@@ -425,11 +506,4 @@ def device_status(device_id: str, authorization: str | None = Header(default=Non
     state = read_device_state(device_id)
     state = refresh_state_from_sessions(device_id, state)
     write_device_state(device_id, state)
-    return {
-        "device_id": device_id,
-        "last_seen_at": state.get("last_seen_at"),
-        "last_yap_completed_at": state.get("last_yap_completed_at"),
-        "last_yap_completed_at_epoch": state.get("last_yap_completed_at_epoch"),
-        "last_session_id": state.get("last_session_id"),
-        "server_time": now_iso(),
-    }
+    return device_status_payload(device_id, state)

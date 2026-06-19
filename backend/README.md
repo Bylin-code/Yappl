@@ -40,10 +40,14 @@ backend/data/
 Each recorded session is saved as:
 
 ```text
-backend/data/sessions/<session_id>/metadata.json
-backend/data/sessions/<session_id>/audio.pcm_s16le
-backend/data/sessions/<session_id>/audio.mp3
+backend/data/devices/<device_id>/state.json
+backend/data/devices/<device_id>/sessions/<session_id>/metadata.json
+backend/data/devices/<device_id>/sessions/<session_id>/audio.pcm_s16le
+backend/data/devices/<device_id>/sessions/<session_id>/audio.mp3
 ```
+
+Older local recordings in `backend/data/sessions/<session_id>/` are still read
+for compatibility, but new recordings are written under the device folder.
 
 The audio file is raw mono signed 16-bit little-endian PCM at the sample rate in
 `metadata.json`. When the session finishes, the backend also converts that PCM
