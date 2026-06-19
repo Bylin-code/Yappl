@@ -33,9 +33,7 @@ void YapplApp::begin() {
   if (backendReady_ && wifi_.isConnected()) {
     const BackendStatus status = backend_.fetchStatus();
     backendConnected_ = status.requestOk;
-    if (status.lastYapCompletedAtEpoch > 0) {
-      rememberLastYapEpoch(status.lastYapCompletedAtEpoch);
-    }
+    applyBackendStatus(status);
   }
 
   // The three RTOS tasks share AppState, so access is protected by this mutex.
@@ -175,11 +173,60 @@ void YapplApp::rememberLastYapEpoch(uint64_t epoch) {
   portEXIT_CRITICAL(&yapEpochMux_);
 }
 
+void YapplApp::setLastYapEpochFromBackend(uint64_t epoch) {
+  portENTER_CRITICAL(&yapEpochMux_);
+  lastYapEpochThisBoot_ = epoch;
+  portEXIT_CRITICAL(&yapEpochMux_);
+}
+
 uint64_t YapplApp::lastYapEpochThisBoot() {
   portENTER_CRITICAL(&yapEpochMux_);
   const uint64_t epoch = lastYapEpochThisBoot_;
   portEXIT_CRITICAL(&yapEpochMux_);
   return epoch;
+}
+
+bool YapplApp::appModeFromBackendName(const String &name, AppMode &mode) const {
+  if (name == "idle_day") {
+    mode = AppMode::IdleDay;
+    return true;
+  }
+  if (name == "idle_night") {
+    mode = AppMode::IdleNight;
+    return true;
+  }
+  if (name == "reminder") {
+    mode = AppMode::Reminder;
+    return true;
+  }
+  return false;
+}
+
+void YapplApp::applyBackendStatus(const BackendStatus &status) {
+  if (!status.requestOk) {
+    return;
+  }
+
+  setLastYapEpochFromBackend(status.lastYapCompletedAtEpoch);
+
+  AppMode backendMode = AppMode::IdleDay;
+  if (appModeFromBackendName(status.mode, backendMode)) {
+    portENTER_CRITICAL(&backendStateMux_);
+    pendingBackendMode_ = backendMode;
+    pendingBackendModeKnown_ = true;
+    portEXIT_CRITICAL(&backendStateMux_);
+  }
+}
+
+bool YapplApp::consumePendingBackendMode(AppMode &mode) {
+  portENTER_CRITICAL(&backendStateMux_);
+  const bool known = pendingBackendModeKnown_;
+  if (known) {
+    mode = pendingBackendMode_;
+    pendingBackendModeKnown_ = false;
+  }
+  portEXIT_CRITICAL(&backendStateMux_);
+  return known;
 }
 
 void YapplApp::setLedBrightness(uint8_t brightness) {
@@ -393,6 +440,12 @@ void YapplApp::outputTask() {
 
     // Decide if the product state should change. YapplApp reacts only to the
     // transition side effects it owns, such as starting/stopping audio upload.
+    AppMode backendMode = AppMode::IdleDay;
+    if (consumePendingBackendMode(backendMode) &&
+        stateController_.applyBackendMode(backendMode, nowMs)) {
+      Serial.printf("Mode synced from backend -> %s\n", StateController::modeName(backendMode));
+    }
+
     TimeContext time = currentTimeContext();
     const bool modeChanged = stateController_.update(nowMs, snapshot, time);
     const AppMode mode = stateController_.mode();
@@ -589,18 +642,17 @@ void YapplApp::networkTask() {
         lastStatusMs = nowMs;
         const BackendStatus status = backend_.fetchStatus();
         connected = status.requestOk || connected;
-        if (status.requestOk && status.lastYapCompletedAtEpoch > 0) {
-          rememberLastYapEpoch(status.lastYapCompletedAtEpoch);
-        }
+        applyBackendStatus(status);
       }
 
       if (nowMs - lastPingMs >= AppConfig::backendPingPeriodMs) {
         lastPingMs = nowMs;
         const AppState snapshot = stateSnapshot();
-        connected = backend_.ping(snapshot.wifiConnected,
-                                  snapshot.timeSynced,
-                                  StateController::modeName(snapshot.mode)) ||
-                    connected;
+        const BackendStatus status = backend_.ping(snapshot.wifiConnected,
+                                                   snapshot.timeSynced,
+                                                   StateController::modeName(snapshot.mode));
+        connected = status.requestOk || connected;
+        applyBackendStatus(status);
       }
     } else {
       connected = false;

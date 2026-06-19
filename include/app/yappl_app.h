@@ -57,7 +57,10 @@ class YapplApp {
   size_t recordedBytes_ = 0;
   size_t droppedAudioBytes_ = 0;
   portMUX_TYPE yapEpochMux_ = portMUX_INITIALIZER_UNLOCKED;
+  portMUX_TYPE backendStateMux_ = portMUX_INITIALIZER_UNLOCKED;
   uint64_t lastYapEpochThisBoot_ = 0;
+  bool pendingBackendModeKnown_ = false;
+  AppMode pendingBackendMode_ = AppMode::IdleDay;
 
   // Shared state and RTOS handles.
   AppState state_;
@@ -85,7 +88,11 @@ class YapplApp {
   bool startTasks();
   TimeContext currentTimeContext();
   void rememberLastYapEpoch(uint64_t epoch);
+  void setLastYapEpochFromBackend(uint64_t epoch);
   uint64_t lastYapEpochThisBoot();
+  bool appModeFromBackendName(const String &name, AppMode &mode) const;
+  void applyBackendStatus(const BackendStatus &status);
+  bool consumePendingBackendMode(AppMode &mode);
 
   // Output helpers only touch hardware when the value actually changes.
   void setLedBrightness(uint8_t brightness);

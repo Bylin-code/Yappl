@@ -86,16 +86,17 @@ bool BackendClient::begin() {
   return true;
 }
 
-bool BackendClient::ping(bool wifiConnected, bool timeSynced, const char *modeName) {
+BackendStatus BackendClient::ping(bool wifiConnected, bool timeSynced, const char *modeName) {
+  BackendStatus status;
   if (!configured_) {
-    return false;
+    return status;
   }
 
   HTTPClient http;
   http.setTimeout(AppConfig::backendHttpTimeoutMs);
   if (!http.begin(urlFor("/device/ping"))) {
     Serial.println(F("Backend ping failed: bad URL"));
-    return false;
+    return status;
   }
 
   http.addHeader("Content-Type", "application/json");
@@ -109,11 +110,22 @@ bool BackendClient::ping(bool wifiConnected, bool timeSynced, const char *modeNa
   body += "}";
 
   const int code = http.POST(body);
+  const String response = http.getString();
   http.end();
 
-  const bool ok = code >= 200 && code < 300;
-  Serial.printf("Backend ping %s: HTTP %d url=%s\n", ok ? "OK" : "failed", code, baseUrl_.c_str());
-  return markRequestResult(ok);
+  status.requestOk = code >= 200 && code < 300;
+  if (status.requestOk) {
+    status.lastYapCompletedAtEpoch = jsonUnsignedValue(response, "last_yap_completed_at_epoch");
+    status.mode = jsonStringValue(response, "mode");
+  }
+  Serial.printf("Backend ping %s: HTTP %d url=%s mode=%s last_yap_epoch=%llu\n",
+                status.requestOk ? "OK" : "failed",
+                code,
+                baseUrl_.c_str(),
+                status.mode.c_str(),
+                static_cast<unsigned long long>(status.lastYapCompletedAtEpoch));
+  markRequestResult(status.requestOk);
+  return status;
 }
 
 bool BackendClient::sendYapCompleted(uint64_t completedAtEpoch) {
@@ -256,10 +268,14 @@ BackendStatus BackendClient::fetchStatus() {
   http.end();
 
   status.requestOk = code >= 200 && code < 300;
-  status.lastYapCompletedAtEpoch = status.requestOk ? jsonUnsignedValue(body, "last_yap_completed_at_epoch") : 0;
-  Serial.printf("Backend status %s: HTTP %d last_yap_epoch=%llu\n",
+  if (status.requestOk) {
+    status.lastYapCompletedAtEpoch = jsonUnsignedValue(body, "last_yap_completed_at_epoch");
+    status.mode = jsonStringValue(body, "mode");
+  }
+  Serial.printf("Backend status %s: HTTP %d mode=%s last_yap_epoch=%llu\n",
                 status.requestOk ? "OK" : "failed",
                 code,
+                status.mode.c_str(),
                 static_cast<unsigned long long>(status.lastYapCompletedAtEpoch));
   markRequestResult(status.requestOk);
   return status;

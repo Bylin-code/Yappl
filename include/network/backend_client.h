@@ -10,6 +10,7 @@ namespace yappl {
 struct BackendStatus {
   bool requestOk = false;
   uint64_t lastYapCompletedAtEpoch = 0;
+  String mode;
 };
 
 // Small HTTP client for Yappl's backend API. It owns URL construction, auth
@@ -20,7 +21,7 @@ class BackendClient {
   bool begin();
   bool isConfigured() const { return configured_; }
 
-  bool ping(bool wifiConnected, bool timeSynced, const char *modeName);
+  BackendStatus ping(bool wifiConnected, bool timeSynced, const char *modeName);
   bool sendYapCompleted(uint64_t completedAtEpoch);
   String startAudioSession(uint64_t startedAtEpoch, uint32_t sampleRateHz);
   bool uploadAudioChunk(const String &sessionId, const uint8_t *data, size_t byteCount);

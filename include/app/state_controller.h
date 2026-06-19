@@ -26,6 +26,7 @@ class StateController {
 
   AppMode mode() const { return mode_; }
   uint32_t modeStartedAtMs() const { return modeStartedAtMs_; }
+  bool applyBackendMode(AppMode mode, uint32_t nowMs);
   bool consumeSessionCompleted();
   bool consumeClearYapRequested();
 

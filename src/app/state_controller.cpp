@@ -122,6 +122,18 @@ bool StateController::consumeSessionCompleted() {
   return true;
 }
 
+bool StateController::applyBackendMode(AppMode mode, uint32_t nowMs) {
+  if (mode != AppMode::IdleDay && mode != AppMode::IdleNight && mode != AppMode::Reminder) {
+    return false;
+  }
+
+  if (mode_ != AppMode::IdleDay && mode_ != AppMode::IdleNight && mode_ != AppMode::Reminder && mode_ != AppMode::NotYet) {
+    return false;
+  }
+
+  return enterMode(mode, nowMs);
+}
+
 bool StateController::consumeClearYapRequested() {
   if (!clearYapRequested_) {
     return false;
