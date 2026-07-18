@@ -106,7 +106,6 @@ devices
 journal_sessions
 transcripts
 summaries
-questions
 ```
 
 Use object storage for recordings:
@@ -153,7 +152,6 @@ Use the transcript to generate:
 - Key events.
 - Mood/theme tags.
 - Notable people.
-- Possible follow-up questions.
 
 Store the result in the backend.
 
@@ -197,23 +195,7 @@ Polish the bedside experience:
 
 The device should feel calm and intentional.
 
-## 15. Add Live AI Questions
-
-Only add this after the basic recording, upload, transcription, and summary loop works.
-
-Target behavior:
-
-```text
-device records
-backend receives live audio/transcript chunks
-backend decides when a question is useful
-device receives question
-OLED displays question
-```
-
-Avoid asking too many questions. The device should not interrupt the user.
-
-## 16. Add Product-Level Setup
+## 15. Add Product-Level Setup
 
 Before anyone else can use it, add:
 
@@ -225,7 +207,7 @@ Before anyone else can use it, add:
 - Device reset flow.
 - Export/delete controls.
 
-## 17. Productize the Hardware
+## 16. Productize the Hardware
 
 After the interaction works:
 
@@ -244,4 +226,4 @@ After the interaction works:
 4. Add Wi-Fi.
 5. Add the first backend health check.
 
-Backend, phone app, and live AI should come after the device has a solid local recording flow.
+Backend summaries and the phone app should come after the device has a solid local recording flow.

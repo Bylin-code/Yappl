@@ -5,11 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Body, FastAPI, Header, HTTPException, Query, Response
+from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .settings import settings
+from .transcription import transcribe_mp3, transcript_path
 
 
 app = FastAPI(title="Yappl Backend")
@@ -115,6 +116,7 @@ def session_snapshot(metadata: dict) -> dict:
         "completed_at_epoch": metadata.get("completed_at_epoch"),
         "audio_bytes": metadata.get("audio_bytes", 0),
         "mp3_status": metadata.get("mp3_status"),
+        "transcription_status": metadata.get("transcription_status"),
     }
 
 
@@ -250,6 +252,29 @@ def mp3_path(session_id: str, device_id: str | None = None) -> Path:
     return folder / "audio.mp3"
 
 
+def run_session_transcription(session_id: str) -> None:
+    """Run local speech-to-text after the finish response has been returned."""
+    metadata = read_metadata(session_id)
+    if metadata.get("mp3_status") != "ready":
+        metadata["transcription_status"] = "skipped"
+        metadata["transcription_error"] = "MP3 was not ready"
+        write_metadata(session_id, metadata)
+        return
+
+    print("transcription started:", session_id, flush=True)
+    result = transcribe_mp3(metadata_path(session_id).parent)
+    metadata = read_metadata(session_id)
+    metadata.update(result)
+    metadata["transcription_completed_at"] = now_iso()
+    write_metadata(session_id, metadata)
+    print(
+        "transcription finished:",
+        session_id,
+        f"status={metadata.get('transcription_status')}",
+        flush=True,
+    )
+
+
 def read_metadata(session_id: str) -> dict:
     path = metadata_path(session_id)
     if not path.exists():
@@ -342,6 +367,9 @@ def session_start(payload: SessionStart, authorization: str | None = Header(defa
         "mp3_status": "not_created",
         "mp3_file": None,
         "mp3_bytes": 0,
+        "transcription_status": "pending",
+        "transcript_file": None,
+        "transcript_bytes": 0,
     }
     write_metadata(session_id, metadata)
     audio_path(session_id, payload.device_id).write_bytes(b"")
@@ -380,7 +408,11 @@ async def session_audio(
 
 
 @app.post("/device/session/finish")
-def session_finish(payload: SessionFinish, authorization: str | None = Header(default=None)) -> dict:
+def session_finish(
+    payload: SessionFinish,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+) -> dict:
     """Mark a durable audio session complete."""
     require_device_secret(authorization)
 
@@ -391,7 +423,11 @@ def session_finish(payload: SessionFinish, authorization: str | None = Header(de
     metadata["completed_at"] = now_iso()
     metadata["completed_at_epoch"] = payload.completed_at_epoch
     metadata = convert_pcm_to_mp3(payload.session_id, metadata)
+    metadata["transcription_status"] = "queued" if metadata.get("mp3_status") == "ready" else "skipped"
     write_metadata(payload.session_id, metadata)
+
+    if metadata["transcription_status"] == "queued":
+        background_tasks.add_task(run_session_transcription, payload.session_id)
 
     state = read_device_state(payload.device_id)
     state = refresh_state_from_sessions(payload.device_id, state)
@@ -410,6 +446,7 @@ def session_finish(payload: SessionFinish, authorization: str | None = Header(de
         "audio_bytes": metadata["audio_bytes"],
         "mp3_status": metadata.get("mp3_status"),
         "mp3_bytes": metadata.get("mp3_bytes", 0),
+        "transcription_status": metadata.get("transcription_status"),
         "last_yap_completed_at_epoch": payload.completed_at_epoch,
     }
 
@@ -445,6 +482,17 @@ def session_mp3_download(session_id: str, authorization: str | None = Header(def
         media_type="audio/mpeg",
         filename=f"{session_id}.mp3",
     )
+
+
+@app.get("/device/session/{session_id}/transcript.txt")
+def session_transcript_download(session_id: str, authorization: str | None = Header(default=None)) -> Response:
+    """Download the local Whisper transcript for a completed session."""
+    require_device_secret(authorization)
+    metadata = read_metadata(session_id)
+    path = transcript_path(metadata_path(session_id).parent)
+    if metadata.get("transcription_status") != "complete" or not path.exists():
+        raise HTTPException(status_code=404, detail="transcript not ready")
+    return FileResponse(path, media_type="text/plain", filename="transcript.txt")
 
 
 @app.post("/device/ping")

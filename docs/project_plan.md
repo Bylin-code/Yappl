@@ -82,7 +82,6 @@ Yappl/
         summaries.ts
       services/
         transcription_service.ts
-        ai_question_service.ts
         summary_service.ts
         storage_service.ts
         device_registry.ts
@@ -148,8 +147,7 @@ Expected states:
 - Session ready.
 - Recording.
 - Uploading.
-- Waiting for AI response.
-- Showing question.
+- Processing summary.
 - Completed.
 - Error.
 
@@ -199,7 +197,6 @@ Expected responsibilities:
 - Device authentication.
 - Audio upload or streaming.
 - Transcription.
-- Live AI follow-up question generation.
 - Journal session storage.
 - Summary generation.
 - User-facing API for future app/web UI.
@@ -232,9 +229,7 @@ Expected responsibilities:
 8. Store raw audio and transcripts.
 9. Add nightly reminder logic.
 10. Add session summaries.
-11. Add OLED question display.
-12. Add live AI follow-up questions.
-13. Add web/app journal viewer.
+11. Add web/app journal viewer.
 
 ## Near-Term Cleanup Direction
 

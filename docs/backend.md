@@ -826,7 +826,7 @@ Backend saves transcript and summary
 Phone app shows the result
 ```
 
-Live AI follow-up questions can come later after basic upload and storage work.
+The initial AI scope ends with transcription and daily summary generation.
 
 ## Future Phone App Role
 

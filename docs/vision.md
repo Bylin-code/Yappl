@@ -10,9 +10,9 @@ The first version is for personal use. The long-term hope is to turn it into a p
 
 ## Personality and Feel
 
-Yappl should feel like a playful journalist companion.
+Yappl should feel like a playful journaling companion.
 
-It should not talk over the user. Instead, it should show text on the OLED to ask questions, answer questions, and guide the session without interrupting the user's train of thought.
+It should quietly record the user's journal entry without interrupting their train of thought. The OLED should communicate device state, reminders, recording progress, and completion.
 
 The device will have a name and personality. It can be funny, but should remain useful and context-aware.
 
@@ -42,16 +42,9 @@ There should also be a hidden on/off switch.
 During a session, Yappl should:
 
 - Listen to the user.
-- Stream or upload audio/transcription to a cloud backend.
-- Maintain a live transcript.
-- Infer context live from what the user is saying.
-- Ask thoughtful follow-up questions only when there is a good question to ask.
-- Detect when the user is asking Yappl a question and answer on the screen.
-- Avoid interrupting the user verbally.
-
-When Yappl has something to show, it should display the question or answer on the OLED.
-
-It can ask multiple follow-up questions per night, but only when the context justifies it.
+- Stream or upload audio to a cloud backend.
+- Show a clear recording state and elapsed time.
+- Avoid interrupting the user.
 
 ## Hardware Direction
 
@@ -89,28 +82,14 @@ Raw audio should not be deleted after transcription, though it may be compressed
 
 The AI should:
 
-- Interpret the yap live.
-- Generate useful follow-up questions.
-- Summarize the session afterward.
+- Transcribe the completed session.
+- Produce a useful daily summary afterward.
+- Identify key events and notable details.
 - Detect moods and themes.
 - Remember previous entries.
-- Ask about patterns over time.
-- Give advice when appropriate.
-- Ask reflective questions.
+- Surface patterns over time in summaries and progress views.
 
-Good example questions:
-
-- "Do you think you will go to more events hosted by Beta Ventures in the future?"
-- "What did you feel when Jake told you about his mother?"
-- "How did you go about approaching people at the Code with Claude event?"
-
-Bad example questions:
-
-- "What did Jack wear today?"
-- "And how did you like that?"
-- "What did you wear today?"
-
-The AI should avoid irrelevant, shallow, or overly generic questions.
+The AI should stay grounded in what the user actually recorded and avoid inventing details.
 
 ## Data and Privacy
 
@@ -159,7 +138,6 @@ The simplest version worth using for one week:
 
 Features that can wait:
 
-- Live AI follow-up questions.
 - Phone app.
 - Interface for browsing raw data and summaries.
 - Rich progress tracking.
@@ -175,10 +153,8 @@ The backend should eventually handle:
 - Device authentication.
 - Audio upload or streaming.
 - Transcription.
-- AI inference.
-- Follow-up question generation.
+- AI summary generation.
 - Journal storage.
-- Summary generation.
 - Future app/API access.
 
 The backend should keep API keys and sensitive cloud credentials off the ESP32 device.
@@ -194,4 +170,3 @@ The backend should keep API keys and sensitive cloud credentials off the ESP32 d
 7. Store transcript and audio in the cloud.
 8. Add nightly reminder logic with LED and OLED.
 9. Add summaries after each session.
-10. Add live AI follow-up questions after the basic journaling loop works.
