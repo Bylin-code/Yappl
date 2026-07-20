@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -10,6 +11,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .settings import settings
+from .memory import correct_transcript, learn_from_session, list_entities, upsert_entity
+from .provider_config import PROVIDERS, public_provider_config, save_provider_config
+from .summarization import summarize_text, summarize_transcript, summary_path
 from .transcription import transcribe_mp3, transcript_path
 
 
@@ -43,6 +47,31 @@ class SessionFinish(BaseModel):
     device_id: str
     session_id: str
     completed_at_epoch: Optional[int] = None
+
+
+class SummarySettingsUpdate(BaseModel):
+    provider: str
+    model: str = ""
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+
+
+class MemoryFactInput(BaseModel):
+    id: Optional[str] = None
+    predicate: str
+    value: str
+    confidence: float = 1.0
+    source_session_id: Optional[str] = None
+    status: str = "active"
+
+
+class MemoryEntityInput(BaseModel):
+    id: Optional[str] = None
+    type: str
+    canonical_name: str
+    description: str = ""
+    aliases: list[str] = []
+    facts: list[MemoryFactInput] = []
 
 
 def require_device_secret(authorization: str | None) -> None:
@@ -117,6 +146,8 @@ def session_snapshot(metadata: dict) -> dict:
         "audio_bytes": metadata.get("audio_bytes", 0),
         "mp3_status": metadata.get("mp3_status"),
         "transcription_status": metadata.get("transcription_status"),
+        "summary_status": metadata.get("summary_status"),
+        "transcript_correction_count": len(metadata.get("transcript_corrections", [])),
     }
 
 
@@ -253,7 +284,7 @@ def mp3_path(session_id: str, device_id: str | None = None) -> Path:
 
 
 def run_session_transcription(session_id: str) -> None:
-    """Run local speech-to-text after the finish response has been returned."""
+    """Run local speech-to-text and then create the session summary."""
     metadata = read_metadata(session_id)
     if metadata.get("mp3_status") != "ready":
         metadata["transcription_status"] = "skipped"
@@ -266,6 +297,8 @@ def run_session_transcription(session_id: str) -> None:
     metadata = read_metadata(session_id)
     metadata.update(result)
     metadata["transcription_completed_at"] = now_iso()
+    if metadata.get("transcription_status") == "complete":
+        metadata["summary_status"] = "processing"
     write_metadata(session_id, metadata)
     print(
         "transcription finished:",
@@ -273,6 +306,25 @@ def run_session_transcription(session_id: str) -> None:
         f"status={metadata.get('transcription_status')}",
         flush=True,
     )
+    if metadata.get("transcription_status") != "complete":
+        return
+
+    correction_result = correct_transcript(session_id, metadata_path(session_id).parent)
+    metadata = read_metadata(session_id)
+    metadata.update(correction_result)
+    write_metadata(session_id, metadata)
+    print("transcript memory corrections:", session_id, f"count={len(correction_result['transcript_corrections'])}", flush=True)
+
+    print("summary started:", session_id, flush=True)
+    summary_result = summarize_transcript(metadata_path(session_id).parent)
+    metadata = read_metadata(session_id)
+    metadata.update(summary_result)
+    metadata["summary_completed_at"] = now_iso()
+    if metadata.get("summary_status") == "complete":
+        transcript = transcript_path(metadata_path(session_id).parent).read_text().strip()
+        metadata.update(learn_from_session(session_id, transcript))
+    write_metadata(session_id, metadata)
+    print("summary finished:", session_id, f"status={metadata.get('summary_status')}", flush=True)
 
 
 def read_metadata(session_id: str) -> dict:
@@ -347,6 +399,65 @@ def health() -> dict:
     }
 
 
+@app.get("/memory/entities")
+def memory_entities(authorization: str | None = Header(default=None)) -> dict:
+    """List canonical people/projects, aliases, and active facts."""
+    require_device_secret(authorization)
+    return {"entities": list_entities()}
+
+
+@app.put("/memory/entities/{entity_id}")
+def update_memory_entity(entity_id: str, payload: MemoryEntityInput, authorization: str | None = Header(default=None)) -> dict:
+    """Create or update a canonical entity and its user-confirmed memory."""
+    require_device_secret(authorization)
+    try:
+        entity = upsert_entity(
+            entity_id,
+            payload.type,
+            payload.canonical_name,
+            payload.description,
+            payload.aliases,
+            [fact.model_dump() for fact in payload.facts],
+        )
+    except (sqlite3.Error, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"status": "ok", "entity": entity}
+
+
+@app.get("/settings/summary")
+def summary_settings(authorization: str | None = Header(default=None)) -> dict:
+    """Return available providers and the active selection without exposing keys."""
+    require_device_secret(authorization)
+    return {
+        "enabled": settings.yappl_summary_enabled,
+        "active": public_provider_config(),
+        "providers": [
+            {"id": provider_id, "label": provider["label"], "default_model": provider["default_model"], "requires_api_key": provider["kind"] != "ollama"}
+            for provider_id, provider in PROVIDERS.items()
+        ],
+    }
+
+
+@app.put("/settings/summary")
+def update_summary_settings(payload: SummarySettingsUpdate, authorization: str | None = Header(default=None)) -> dict:
+    """Select a provider/model and optionally encrypt a new API key on disk."""
+    require_device_secret(authorization)
+    try:
+        return {"status": "ok", "active": save_provider_config(payload.provider, payload.model, payload.api_key, payload.base_url)}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/settings/summary/test")
+def test_summary_settings(authorization: str | None = Header(default=None)) -> dict:
+    """Make a tiny real provider request to verify the saved selection and key."""
+    require_device_secret(authorization)
+    result = summarize_text("I had a short, productive day and finished an important task.")
+    if result.get("summary_status") != "complete":
+        raise HTTPException(status_code=400, detail=result.get("summary_error", "provider test failed"))
+    return {"status": "ok", "provider": result["summary_provider"], "model": result["summary_model"]}
+
+
 @app.post("/device/session/start")
 def session_start(payload: SessionStart, authorization: str | None = Header(default=None)) -> dict:
     """Create a durable audio session folder and metadata file."""
@@ -370,6 +481,9 @@ def session_start(payload: SessionStart, authorization: str | None = Header(defa
         "transcription_status": "pending",
         "transcript_file": None,
         "transcript_bytes": 0,
+        "summary_status": "pending",
+        "summary_file": None,
+        "summary_bytes": 0,
     }
     write_metadata(session_id, metadata)
     audio_path(session_id, payload.device_id).write_bytes(b"")
@@ -493,6 +607,44 @@ def session_transcript_download(session_id: str, authorization: str | None = Hea
     if metadata.get("transcription_status") != "complete" or not path.exists():
         raise HTTPException(status_code=404, detail="transcript not ready")
     return FileResponse(path, media_type="text/plain", filename="transcript.txt")
+
+
+@app.get("/device/session/{session_id}/summary.txt")
+def session_summary_download(session_id: str, authorization: str | None = Header(default=None)) -> Response:
+    """Download the AI-generated daily summary for a completed session."""
+    require_device_secret(authorization)
+    metadata = read_metadata(session_id)
+    path = summary_path(metadata_path(session_id).parent)
+    if metadata.get("summary_status") != "complete" or not path.exists():
+        raise HTTPException(status_code=404, detail="summary not ready")
+    return FileResponse(path, media_type="text/plain", filename="summary.txt")
+
+
+@app.post("/device/session/{session_id}/summary/retry")
+def retry_session_summary(session_id: str, background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)) -> dict:
+    """Retry summary generation without retranscribing the audio."""
+    require_device_secret(authorization)
+    metadata = read_metadata(session_id)
+    if metadata.get("transcription_status") != "complete":
+        raise HTTPException(status_code=409, detail="transcript is not complete")
+    metadata["summary_status"] = "queued"
+    metadata.pop("summary_error", None)
+    write_metadata(session_id, metadata)
+
+    def run_retry() -> None:
+        correction = correct_transcript(session_id, metadata_path(session_id).parent)
+        result = summarize_transcript(metadata_path(session_id).parent)
+        current = read_metadata(session_id)
+        current.update(correction)
+        current.update(result)
+        if current.get("summary_status") == "complete":
+            transcript = transcript_path(metadata_path(session_id).parent).read_text().strip()
+            current.update(learn_from_session(session_id, transcript))
+        current["summary_completed_at"] = now_iso()
+        write_metadata(session_id, current)
+
+    background_tasks.add_task(run_retry)
+    return {"status": "ok", "session_id": session_id, "summary_status": "queued"}
 
 
 @app.post("/device/ping")
