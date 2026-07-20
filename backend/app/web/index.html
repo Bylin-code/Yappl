@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f7f8f5">
+    <title>Yappl Journal</title>
+    <link rel="stylesheet" href="/static/styles.css?v=6">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#journal" aria-label="Yappl journal home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>Yappl</span>
+      </a>
+      <nav class="primary-nav" aria-label="Primary navigation">
+        <button class="nav-link active" data-view="journal">Journal</button>
+        <button class="nav-link" data-view="memory">Memory</button>
+      </nav>
+    </header>
+
+    <main>
+      <section id="journal-view" class="view active" aria-labelledby="journal-title">
+        <div class="intro-row">
+          <div>
+            <p class="eyebrow">Your spoken journal</p>
+            <h1 id="journal-title">A year in yaps</h1>
+          </div>
+          <div class="journal-stat" aria-live="polite">
+            <strong id="total-yaps">—</strong>
+            <span>sessions recorded</span>
+          </div>
+        </div>
+
+        <section class="heatmap-card" aria-label="Journal activity over the past year">
+          <div class="heatmap-scroll">
+            <div id="month-labels" class="month-labels" aria-hidden="true"></div>
+            <div class="heatmap-layout">
+              <div class="weekday-labels" aria-hidden="true"><span>Mon</span><span>Wed</span><span>Fri</span></div>
+              <div id="heatmap" class="heatmap" role="grid" aria-label="Daily yap activity"></div>
+            </div>
+          </div>
+          <div class="heatmap-footer">
+            <div class="year-navigation" aria-label="Heatmap date range">
+              <button id="older-year" type="button" aria-label="Show previous 12 months">←</button>
+              <span id="heatmap-range">Past 12 months</span>
+              <button id="newer-year" type="button" aria-label="Show next 12 months">→</button>
+            </div>
+            <div class="legend" aria-label="Activity intensity"><span>Less</span><i class="level-0"></i><i class="level-1"></i><i class="level-2"></i><i class="level-3"></i><i class="level-4"></i><span>More</span></div>
+          </div>
+        </section>
+
+        <section id="day-detail" class="day-detail empty" aria-live="polite">
+          <div class="empty-state">
+            <span class="empty-dot"></span>
+            <p>Select a day to read its journal.</p>
+          </div>
+        </section>
+      </section>
+
+      <section id="memory-view" class="view" aria-labelledby="memory-title">
+        <div class="intro-row memory-intro">
+          <div>
+            <p class="eyebrow">What Yappl remembers</p>
+            <h1 id="memory-title">Memory</h1>
+          </div>
+          <p class="memory-note">Built gradually from recurring details in your journals.</p>
+        </div>
+        <div id="memory-tabs" class="memory-tabs" role="tablist" aria-label="Memory categories"></div>
+        <div id="memory-content" class="memory-content" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+    <script src="/static/app.js?v=4" defer></script>
+  </body>
+</html>

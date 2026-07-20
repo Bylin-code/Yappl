@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import subprocess
 import threading
@@ -9,10 +10,11 @@ from typing import Optional
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .settings import settings
-from .memory import correct_transcript, learn_from_session, list_entities, upsert_entity
+from .memory import canonicalize_known_aliases, correct_transcript, learn_from_session, list_entities, list_pending_entities, upsert_entity
 from .provider_config import PROVIDERS, public_provider_config, save_provider_config
 from .summarization import summarize_text, summarize_transcript, summary_path
 from .transcription import transcribe_mp3, transcript_path
@@ -31,6 +33,8 @@ from .session_store import (
 
 app = FastAPI(title="Yappl Backend")
 processing_wakeup = threading.Event()
+WEB_ROOT = Path(__file__).parent / "web"
+app.mount("/static", StaticFiles(directory=WEB_ROOT), name="static")
 
 # This is intentionally in-memory for the first connection milestone. It proves
 # the ESP32 can reach the backend before we add Postgres or cloud storage.
@@ -441,11 +445,113 @@ def health() -> dict:
     }
 
 
+@app.get("/", include_in_schema=False)
+def journal_dashboard() -> Response:
+    return FileResponse(WEB_ROOT / "index.html", media_type="text/html")
+
+
+def all_session_metadata() -> list[dict]:
+    sessions: list[dict] = []
+    devices_root = storage_root() / "devices"
+    if not devices_root.exists():
+        return sessions
+    for device_folder in devices_root.iterdir():
+        if device_folder.is_dir():
+            sessions.extend(sessions_for_device(device_folder.name))
+    return sessions
+
+
+def session_summary_text(metadata: dict) -> str:
+    path = summary_path(metadata_path(metadata["session_id"]).parent)
+    return canonicalize_known_aliases(path.read_text().strip()) if path.exists() else ""
+
+
+def session_transcript_text(metadata: dict) -> str:
+    """Return the corrected transcript with the latest known aliases applied."""
+    folder = metadata_path(metadata["session_id"]).parent
+    corrected = folder / "transcript.corrected.txt"
+    path = corrected if corrected.exists() else transcript_path(folder)
+    return canonicalize_known_aliases(path.read_text().strip()) if path.exists() else ""
+
+
+def summary_preview(summary: str, max_characters: int = 240) -> str:
+    """Return a clean one-to-two-sentence preview instead of a raw truncation."""
+    if not summary:
+        return ""
+    sentences = re.split(r"(?<=[.!?])\s+", " ".join(summary.split()))
+    selected: list[str] = []
+    for sentence in sentences:
+        candidate = " ".join([*selected, sentence]).strip()
+        if selected and len(candidate) > max_characters:
+            break
+        selected.append(sentence)
+        if len(selected) == 2 or len(candidate) >= 120:
+            break
+    preview = " ".join(selected).strip()
+    if len(preview) <= max_characters:
+        return preview
+    shortened = preview[:max_characters].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return shortened + "…"
+
+
+@app.get("/api/journal/sessions")
+def journal_sessions() -> dict:
+    """Read-only session index used by the local journal dashboard."""
+    items = []
+    for metadata in all_session_metadata():
+        summary = session_summary_text(metadata)
+        transcript = session_transcript_text(metadata)
+        sample_rate = int(metadata.get("sample_rate_hz") or 16000)
+        duration_seconds = int(metadata.get("audio_bytes", 0)) // max(sample_rate * 2, 1)
+        items.append(
+            {
+                "session_id": metadata.get("session_id"),
+                "device_id": metadata.get("device_id"),
+                "completed_at": metadata.get("completed_at"),
+                "completed_at_epoch": metadata.get("completed_at_epoch"),
+                "duration_seconds": duration_seconds,
+                "summary_status": metadata.get("summary_status"),
+                "summary_excerpt": canonicalize_known_aliases(metadata.get("summary_preview") or summary_preview(summary)),
+                "summary": summary,
+                "transcript": transcript,
+                "audio_url": f"/api/journal/sessions/{metadata.get('session_id')}/audio.mp3" if metadata.get("mp3_status") == "ready" else None,
+            }
+        )
+    items.sort(key=lambda item: item.get("completed_at_epoch") or 0)
+    return {"sessions": items}
+
+
+@app.get("/api/journal/sessions/{session_id}/audio.mp3")
+def journal_session_audio(session_id: str) -> Response:
+    """Stream a saved session recording to the local journal dashboard."""
+    metadata = read_metadata(session_id)
+    path = mp3_path(session_id)
+    if metadata.get("mp3_status") != "ready" or not path.exists():
+        raise HTTPException(status_code=404, detail="audio not ready")
+    return FileResponse(path, media_type="audio/mpeg", filename=f"{session_id}.mp3")
+
+
+@app.get("/api/memory/library")
+def memory_library() -> dict:
+    """Read-only categorized memory for the local dashboard."""
+    entities = list_entities()
+    return {
+        "categories": {
+            category: [entity for entity in entities if entity["type"] == category]
+            for category in ("person", "place", "object", "event", "organization", "project")
+        },
+        "pending_entities": list_pending_entities(),
+    }
+
+
 @app.get("/memory/entities")
 def memory_entities(authorization: str | None = Header(default=None)) -> dict:
     """List canonical people/projects, aliases, and active facts."""
     require_device_secret(authorization)
-    return {"entities": list_entities()}
+    return {
+        "entities": list_entities(),
+        "pending_entities": list_pending_entities(),
+    }
 
 
 @app.put("/memory/entities/{entity_id}")
@@ -713,6 +819,26 @@ def retry_session_summary(session_id: str, authorization: str | None = Header(de
     enqueue_job(session_id, now_iso())
     processing_wakeup.set()
     return {"status": "ok", "session_id": session_id, "summary_status": "queued"}
+
+
+@app.post("/device/session/{session_id}/memory/retry")
+def retry_session_memory(session_id: str, authorization: str | None = Header(default=None)) -> dict:
+    """Retry memory extraction from an existing transcript without other processing."""
+    require_device_secret(authorization)
+    metadata = read_metadata(session_id)
+    if metadata.get("transcription_status") != "complete":
+        raise HTTPException(status_code=409, detail="transcript is not complete")
+    path = transcript_path(metadata_path(session_id).parent)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="transcript not found")
+
+    result = learn_from_session(session_id, path.read_text().strip())
+    metadata.update(result)
+    metadata["memory_learning_completed_at"] = now_iso()
+    write_metadata(session_id, metadata)
+    if result.get("memory_learning_status") != "complete":
+        raise HTTPException(status_code=502, detail=result.get("memory_learning_error", "memory learning failed"))
+    return {"status": "ok", "session_id": session_id, **result}
 
 
 @app.post("/device/ping")

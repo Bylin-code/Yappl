@@ -4,11 +4,18 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import app, summary_preview
 from app.settings import settings
 
 
 class SessionApiTest(unittest.TestCase):
+    def test_summary_preview_returns_one_or_two_clean_sentences(self) -> None:
+        summary = "The morning was spent testing Wally for a customer demonstration. Lunch was with the intern team. The evening was quiet."
+        self.assertEqual(
+            summary_preview(summary),
+            "The morning was spent testing Wally for a customer demonstration. Lunch was with the intern team.",
+        )
+
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.storage_patch = patch.object(settings, "yappl_storage_dir", self.temporary_directory.name)

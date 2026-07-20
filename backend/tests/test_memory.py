@@ -3,11 +3,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.memory import correct_transcript, learn_from_session, list_entities, relevant_memory_context
+from app.memory import canonicalize_known_aliases, correct_transcript, learn_from_session, list_entities, relevant_memory_context
 from app.settings import settings
 
 
 class MemoryTest(unittest.TestCase):
+    def test_saved_text_uses_current_canonical_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch.object(settings, "yappl_storage_dir", temporary_directory):
+                corrected = canonicalize_known_aliases("I called Ylah after working on Yapple.")
+            self.assertEqual(corrected, "I called Ylang after working on Yappl.")
+
     def test_seeds_ylang_and_corrects_known_alias_without_losing_raw_text(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             folder = Path(temporary_directory) / "session_test"
@@ -65,6 +71,59 @@ class MemoryTest(unittest.TestCase):
                 result = learn_from_session("session_rejected", "I had dinner with Eelang.")
 
             self.assertEqual(result["memory_ai_aliases_learned"], [])
+
+    def test_recurring_entities_promote_and_readable_directory_is_generated(self) -> None:
+        response = """{
+          "facts": [], "aliases": [],
+          "new_entities": [{
+            "type": "place", "canonical_name": "Golden Gate Park",
+            "description": "A park the user visits regularly.", "aliases": ["the park"],
+            "facts": [{"predicate": "activity", "value": "weekend walks"}]
+          }]
+        }"""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with (
+                patch.object(settings, "yappl_storage_dir", temporary_directory),
+                patch("app.summarization.generate_text", return_value=(response, "test", "test-model")),
+            ):
+                first = learn_from_session("session_one", "I walked through Golden Gate Park again.")
+                second = learn_from_session("session_two", "I returned to Golden Gate Park this weekend.")
+
+            root = Path(temporary_directory) / "memory"
+            self.assertEqual(first["memory_entities_learned"], [])
+            self.assertEqual(first["memory_entities_staged"][0]["canonical_name"], "Golden Gate Park")
+            self.assertEqual(second["memory_entities_learned"][0]["canonical_name"], "Golden Gate Park")
+            self.assertIn("weekend walks", (root / "places" / "golden-gate-park.md").read_text())
+            self.assertTrue((root / "people").is_dir())
+            self.assertTrue((root / "objects").is_dir())
+            self.assertTrue((root / "events").is_dir())
+
+    def test_learning_receives_full_snapshot_and_can_replace_stale_fact(self) -> None:
+        response = """{
+          "facts": [{"entity_id":"person_ylang","predicate":"relationship_to_user","value":"partner","replace_existing":true}],
+          "aliases": [], "new_entities": []
+        }"""
+        captured = {}
+
+        def fake_generate(system_prompt, transcript, max_tokens):
+            captured["system_prompt"] = system_prompt
+            captured["transcript"] = transcript
+            captured["max_tokens"] = max_tokens
+            return response, "test", "test-model"
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with (
+                patch.object(settings, "yappl_storage_dir", temporary_directory),
+                patch("app.summarization.generate_text", side_effect=fake_generate),
+            ):
+                learn_from_session("session_update", "Ylang is now my partner.")
+                entities = list_entities()
+
+            self.assertIn('"pending_entities":[]', captured["system_prompt"])
+            self.assertIn('"predicate":"relationship_to_user"', captured["system_prompt"])
+            ylang = next(entity for entity in entities if entity["canonical_name"] == "Ylang")
+            relationship_values = [fact["value"] for fact in ylang["facts"] if fact["predicate"] == "relationship_to_user"]
+            self.assertEqual(relationship_values, ["partner"])
 
 
 if __name__ == "__main__":

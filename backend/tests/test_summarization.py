@@ -3,10 +3,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from app.summarization import summary_target_words, summarize_transcript, system_prompt_for
+from app.summarization import _extract_anthropic_text, summary_target_words, summarize_transcript, system_prompt_for
 
 
 class SummarizationTest(unittest.TestCase):
+    def test_anthropic_text_extraction_skips_non_text_blocks(self) -> None:
+        data = {
+            "content": [
+                {"type": "thinking", "thinking": "internal"},
+                {"type": "text", "text": '{"facts":[],"aliases":[],"new_entities":[]}'},
+            ]
+        }
+        self.assertEqual(_extract_anthropic_text(data), '{"facts":[],"aliases":[],"new_entities":[]}')
+
     def test_summary_length_scales_with_transcript(self) -> None:
         self.assertEqual(summary_target_words("word " * 130), 75)
         self.assertEqual(summary_target_words("word " * 650), 125)

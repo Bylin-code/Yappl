@@ -68,6 +68,19 @@ def initialize_memory() -> None:
                 confidence REAL NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS pending_entities (
+                normalized_key TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                canonical_name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                aliases_json TEXT NOT NULL DEFAULT '[]',
+                facts_json TEXT NOT NULL DEFAULT '[]',
+                first_session_id TEXT NOT NULL,
+                last_session_id TEXT NOT NULL,
+                mention_count INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+            DROP TABLE IF EXISTS personal_attributes;
             """
         )
     _seed_entity(
@@ -119,6 +132,33 @@ def list_entities() -> list[dict]:
         return entities
 
 
+def list_pending_entities() -> list[dict]:
+    initialize_memory()
+    with _connect() as db:
+        return [dict(row) for row in db.execute("SELECT * FROM pending_entities ORDER BY type,canonical_name")]
+
+
+def canonicalize_known_aliases(text: str) -> str:
+    """Apply trusted current aliases to any stored/displayed journal text."""
+    if not text:
+        return text
+    initialize_memory()
+    corrected = text
+    with _connect() as db:
+        rows = db.execute(
+            "SELECT a.alias,e.canonical_name FROM aliases a JOIN entities e ON e.id=a.entity_id "
+            "WHERE lower(a.alias)!=lower(e.canonical_name) ORDER BY length(a.alias) DESC"
+        ).fetchall()
+    for row in rows:
+        corrected = re.sub(
+            rf"(?<!\w){re.escape(row['alias'])}(?!\w)",
+            row["canonical_name"],
+            corrected,
+            flags=re.IGNORECASE,
+        )
+    return corrected
+
+
 def upsert_entity(entity_id: str | None, entity_type: str, name: str, description: str, aliases: list[str], facts: list[dict]) -> dict:
     initialize_memory()
     entity_id = entity_id or f"{entity_type}_{uuid.uuid4().hex}"
@@ -136,7 +176,57 @@ def upsert_entity(entity_id: str | None, entity_type: str, name: str, descriptio
                 "INSERT OR REPLACE INTO facts(id,entity_id,predicate,value,confidence,source_session_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (fact.get("id") or f"fact_{uuid.uuid4().hex}", entity_id, fact["predicate"], fact["value"], float(fact.get("confidence", 1.0)), fact.get("source_session_id"), fact.get("status", "active"), now, now),
             )
-    return next(item for item in list_entities() if item["id"] == entity_id)
+    entity = next(item for item in list_entities() if item["id"] == entity_id)
+    from .memory_files import sync_memory_files
+
+    sync_memory_files()
+    return entity
+
+
+def _stage_or_promote_entity(session_id: str, item: dict) -> dict | None:
+    """Promote an entity only after it is identified in two different sessions."""
+    entity_type = str(item.get("type", "")).strip().lower()
+    name = str(item.get("canonical_name", "")).strip()[:120]
+    description = str(item.get("description", "")).strip()[:500]
+    if entity_type not in {"person", "place", "object", "event", "project", "organization"} or not name or not description:
+        return None
+    normalized_key = f"{entity_type}:{_normalized_name(name)}"
+    aliases = [str(alias).strip()[:120] for alias in item.get("aliases", []) if str(alias).strip()][:10]
+    facts = [
+        {
+            "predicate": str(fact.get("predicate", "")).strip()[:80],
+            "value": str(fact.get("value", "")).strip()[:500],
+            "confidence": 0.85,
+            "source_session_id": session_id,
+        }
+        for fact in item.get("facts", [])[:10]
+        if str(fact.get("predicate", "")).strip() and str(fact.get("value", "")).strip()
+    ]
+    now = _now()
+    with _connect() as db:
+        existing = db.execute("SELECT * FROM pending_entities WHERE normalized_key=?", (normalized_key,)).fetchone()
+        if existing is None:
+            db.execute(
+                "INSERT INTO pending_entities(normalized_key,type,canonical_name,description,aliases_json,facts_json,first_session_id,last_session_id,mention_count,updated_at) VALUES(?,?,?,?,?,?,?,?,1,?)",
+                (normalized_key, entity_type, name, description, json.dumps(aliases), json.dumps(facts), session_id, session_id, now),
+            )
+            return None
+        count = int(existing["mention_count"])
+        if existing["last_session_id"] != session_id:
+            count += 1
+        combined_aliases = list(dict.fromkeys([*json.loads(existing["aliases_json"]), *aliases]))[:20]
+        combined_facts = [*json.loads(existing["facts_json"]), *facts][-20:]
+        db.execute(
+            "UPDATE pending_entities SET description=?,aliases_json=?,facts_json=?,last_session_id=?,mention_count=?,updated_at=? WHERE normalized_key=?",
+            (description, json.dumps(combined_aliases), json.dumps(combined_facts), session_id, count, now, normalized_key),
+        )
+        if count < 2:
+            return None
+        db.execute("DELETE FROM pending_entities WHERE normalized_key=?", (normalized_key,))
+    try:
+        return upsert_entity(None, entity_type, name, description, combined_aliases, combined_facts)
+    except sqlite3.IntegrityError:
+        return None
 
 
 def _normalized_name(value: str) -> str:
@@ -233,6 +323,9 @@ def correct_transcript(session_id: str, session_folder: Path) -> dict:
                 )
     corrected_path.write_text(corrected + "\n" if corrected else "")
     source.write_text(corrected + "\n" if corrected else "")
+    from .memory_files import sync_memory_files
+
+    sync_memory_files()
     return {
         "raw_transcript_file": str(raw_path),
         "corrected_transcript_file": str(corrected_path),
@@ -264,27 +357,56 @@ def learn_from_session(session_id: str, transcript: str) -> dict:
     from .summarization import generate_text
 
     entities = list_entities()
-    known = "\n".join(
-        f"- {item['canonical_name']} [{item['id']}], known aliases: "
-        f"{', '.join(alias['alias'] for alias in item['aliases'])}: {item['description']}"
-        for item in entities
-    )
+    # The model receives one compact, authoritative SQLite snapshot. Markdown
+    # files are human-readable mirrors and are intentionally not parsed back.
+    memory_snapshot = {
+        "entities": [
+            {
+                "id": item["id"],
+                "type": item["type"],
+                "name": item["canonical_name"],
+                "description": item["description"],
+                "aliases": [alias["alias"] for alias in item["aliases"]],
+                "facts": [
+                    {"predicate": fact["predicate"], "value": fact["value"], "status": fact["status"]}
+                    for fact in item["facts"]
+                ],
+            }
+            for item in entities
+        ],
+        "pending_entities": [
+            {
+                "type": item["type"],
+                "name": item["canonical_name"],
+                "description": item["description"],
+                "mention_count": item["mention_count"],
+            }
+            for item in list_pending_entities()
+        ],
+    }
+    known = json.dumps(memory_snapshot, separators=(",", ":"), ensure_ascii=False)
     prompt = """Extract only explicit, durable personal facts from this private journal transcript.
 Return strict JSON with this shape:
-{"facts":[{"entity_id":"...","predicate":"short_snake_case","value":"..."}],
+{"facts":[{"entity_id":"...","predicate":"short_snake_case","value":"...","replace_existing":false}],
 "aliases":[{"entity_id":"...","alias":"exact transcript spelling","confidence":0.0}],
-"new_entities":[{"type":"person|project|organization","canonical_name":"...","description":"...","aliases":[],
+"new_entities":[{"type":"person|place|object|event|project|organization","canonical_name":"...","description":"...","aliases":[],
 "facts":[{"predicate":"...","value":"..."}]}]}.
 Suggest an alias for a known entity only when the exact spelling occurs in the transcript, context clearly identifies
 the same entity, and confidence is at least 0.92. Never suggest an ordinary word or another real person's name.
 Use supplied entity IDs for known entities. Create a new entity only when the transcript clearly identifies a
-durable relationship, recurring role, owned project, or important organization. Never create entities for a
-one-off stranger, restaurant, store, ordinary location, meal, or uncertain/misheard name. Do not infer emotions,
+durable relationship, recurring role, owned project, important organization, personally important place or object,
+or a significant event likely to be mentioned again. New entities are staged until they recur in another session.
+Never create entities for a one-off stranger, restaurant, store, ordinary location, meal, or uncertain/misheard name.
+Review the entire supplied current-memory snapshot against the new transcript. Preserve facts and attributes unless
+the transcript explicitly adds, changes, or contradicts them. Set replace_existing=true only when the transcript
+clearly replaces an older value for the same predicate; otherwise leave it false. Do not infer emotions,
 personality traits, diagnoses, temporary moods, or facts not directly stated. Do not save ordinary one-day events.
 Good memories include relationships, occupations, ownership of projects, stable preferences, and durable
 biographical context. If there is nothing durable, return {"facts":[],"aliases":[],"new_entities":[]}. Return JSON only."""
     try:
-        text, provider, model = generate_text(f"{prompt}\n\nKnown entities:\n{known}", transcript, max_tokens=500)
+        # Reasoning-capable models may spend part of this allowance on an
+        # internal thinking block before emitting the JSON text response.
+        text, provider, model = generate_text(f"{prompt}\n\nCurrent memory snapshot (JSON):\n{known}", transcript, max_tokens=3000)
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.IGNORECASE)
         payload = json.loads(cleaned)
     except Exception as error:
@@ -301,10 +423,20 @@ biographical context. If there is nothing durable, return {"facts":[],"aliases":
             value = str(fact.get("value", "")).strip()[:500]
             if entity_id not in valid_ids or not predicate or not value:
                 continue
+            replace_existing = fact.get("replace_existing") is True
+            if replace_existing:
+                db.execute(
+                    "UPDATE facts SET status='superseded',updated_at=? WHERE entity_id=? AND predicate=? AND value!=? AND status='active'",
+                    (now, entity_id, predicate, value),
+                )
             fact_id = f"fact_{uuid.uuid4().hex}"
             db.execute(
                 "INSERT OR IGNORE INTO facts(id,entity_id,predicate,value,confidence,source_session_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (fact_id, entity_id, predicate, value, 0.9, session_id, "active", now, now),
+            )
+            db.execute(
+                "UPDATE facts SET status='active',confidence=0.9,source_session_id=?,updated_at=? WHERE entity_id=? AND predicate=? AND value=?",
+                (session_id, now, entity_id, predicate, value),
             )
             if db.execute("SELECT changes()").fetchone()[0]:
                 learned.append({"entity_id": entity_id, "predicate": predicate, "value": value})
@@ -332,31 +464,14 @@ biographical context. If there is nothing durable, return {"facts":[],"aliases":
             if db.execute("SELECT changes()").fetchone()[0]:
                 learned_aliases.append({"entity_id": entity_id, "alias": alias, "confidence": min(confidence, 1.0)})
     new_entities = []
+    staged_entities = []
     for item in payload.get("new_entities", [])[:10]:
-        entity_type = str(item.get("type", "")).strip().lower()
-        name = str(item.get("canonical_name", "")).strip()[:120]
-        description = str(item.get("description", "")).strip()[:500]
-        if entity_type not in {"person", "project", "organization"} or not name or not description:
-            continue
-        try:
-            entity = upsert_entity(
-                None,
-                entity_type,
-                name,
-                description,
-                [str(alias).strip()[:120] for alias in item.get("aliases", []) if str(alias).strip()][:10],
-                [
-                    {
-                        "predicate": str(fact.get("predicate", "")).strip()[:80],
-                        "value": str(fact.get("value", "")).strip()[:500],
-                        "confidence": 0.85,
-                        "source_session_id": session_id,
-                    }
-                    for fact in item.get("facts", [])[:10]
-                    if str(fact.get("predicate", "")).strip() and str(fact.get("value", "")).strip()
-                ],
-            )
+        entity = _stage_or_promote_entity(session_id, item)
+        if entity is not None:
             new_entities.append({"id": entity["id"], "canonical_name": entity["canonical_name"], "type": entity["type"]})
-        except sqlite3.IntegrityError:
-            continue
-    return {"memory_learning_status": "complete", "memory_facts_learned": learned, "memory_ai_aliases_learned": learned_aliases, "memory_entities_learned": new_entities, "memory_provider": provider, "memory_model": model}
+        else:
+            staged_entities.append({"canonical_name": str(item.get("canonical_name", ""))[:120], "type": str(item.get("type", ""))})
+    from .memory_files import sync_memory_files
+
+    sync_memory_files()
+    return {"memory_learning_status": "complete", "memory_facts_learned": learned, "memory_ai_aliases_learned": learned_aliases, "memory_entities_learned": new_entities, "memory_entities_staged": staged_entities, "memory_provider": provider, "memory_model": model}

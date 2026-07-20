@@ -20,6 +20,16 @@ curl http://localhost:8000/health
 docker compose ps
 ```
 
+Open the local journal dashboard on this computer:
+
+```text
+http://localhost:8000
+```
+
+Other devices on the same network can use the backend computer's LAN address,
+for example `http://10.0.0.144:8000`. The dashboard is intentionally read-only
+and has no login in local mode, so only expose port 8000 on a trusted network.
+
 Run the backend test suite in the reproducible container environment:
 
 ```bash
