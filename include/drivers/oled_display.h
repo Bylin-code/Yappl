@@ -14,11 +14,12 @@ class OledDisplay {
   bool begin();
   void clear();
 
-  // Draw exactly one frame produced by ActPlayer, plus a tiny top-right Wi-Fi
-  // status icon so connection state is visible without Serial Monitor.
+  // Draw exactly one frame produced by ActPlayer, plus Wi-Fi and backend
+  // heartbeat status so connectivity is visible without Serial Monitor.
   void drawFaceFrame(const FaceFrame &frame,
                      bool wifiConnected,
                      bool backendConnected,
+                     bool audioUploading,
                      bool timeSynced,
                      uint8_t hour,
                      uint8_t minute);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -50,12 +51,13 @@ class YapplApp {
   int32_t micSamples_[AppConfig::micSampleCount] = {};
   uint8_t *audioRingBuffer_ = nullptr;
   uint8_t *audioUploadBatch_ = nullptr;
-  portMUX_TYPE audioRingMux_ = portMUX_INITIALIZER_UNLOCKED;
+  SemaphoreHandle_t audioMutex_ = nullptr;
   size_t audioRingWriteIndex_ = 0;
   size_t audioRingReadIndex_ = 0;
   size_t audioRingBytesUsed_ = 0;
-  size_t recordedBytes_ = 0;
-  size_t droppedAudioBytes_ = 0;
+  std::atomic<size_t> recordedBytes_{0};
+  std::atomic<size_t> droppedAudioBytes_{0};
+  uint32_t nextAudioSequence_ = 1;
   portMUX_TYPE yapEpochMux_ = portMUX_INITIALIZER_UNLOCKED;
   portMUX_TYPE backendStateMux_ = portMUX_INITIALIZER_UNLOCKED;
   uint64_t lastYapEpochThisBoot_ = 0;
@@ -72,13 +74,14 @@ class YapplApp {
   bool displayReady_ = false;
   bool micReady_ = false;
   bool backendReady_ = false;
-  bool backendConnected_ = false;
+  std::atomic<bool> backendConnected_{false};
+  std::atomic<bool> audioUploading_{false};
   bool tasksStarted_ = false;
-  bool pendingBackendYapCompleted_ = false;
-  uint64_t pendingBackendYapCompletedEpoch_ = 0;
-  bool pendingBackendSessionStart_ = false;
-  bool pendingBackendSessionFinish_ = false;
-  bool audioCaptureActive_ = false;
+  std::atomic<bool> pendingBackendYapCompleted_{false};
+  std::atomic<uint64_t> pendingBackendYapCompletedEpoch_{0};
+  std::atomic<bool> pendingBackendSessionStart_{false};
+  std::atomic<bool> pendingBackendSessionFinish_{false};
+  std::atomic<bool> audioCaptureActive_{false};
   String activeBackendSessionId_;
   uint8_t lastLedBrightness_ = 0;
   uint16_t currentPiezoFrequencyHz_ = 0;
@@ -86,6 +89,7 @@ class YapplApp {
   // Helpers for turning raw hardware inputs into product values.
   uint8_t lightLevelFromRaw(int raw) const;
   bool startTasks();
+  bool validateHardware();
   TimeContext currentTimeContext();
   void rememberLastYapEpoch(uint64_t epoch);
   void setLastYapEpochFromBackend(uint64_t epoch);
@@ -103,7 +107,8 @@ class YapplApp {
   void allocateAudioBuffers();
   void resetAudioStream();
   void pushAudioSamples(const int32_t *samples, size_t sampleCount);
-  size_t popAudioBatch(uint8_t *destination, size_t maxBytes);
+  size_t peekAudioBatch(uint8_t *destination, size_t maxBytes);
+  void commitAudioBatch(size_t byteCount);
   uint8_t micLevelFromSamples(const int32_t *samples, size_t sampleCount) const;
 
   // State helpers always take/release the mutex internally. Callers should copy
@@ -113,6 +118,7 @@ class YapplApp {
   void publishOutputState(AppMode mode,
                           bool wifiConnected,
                           bool backendConnected,
+                          bool audioUploading,
                           bool timeSynced,
                           uint8_t currentHour,
                           uint8_t currentMinute,

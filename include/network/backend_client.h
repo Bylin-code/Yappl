@@ -24,7 +24,11 @@ class BackendClient {
   BackendStatus ping(bool wifiConnected, bool timeSynced, const char *modeName);
   bool sendYapCompleted(uint64_t completedAtEpoch);
   String startAudioSession(uint64_t startedAtEpoch, uint32_t sampleRateHz);
-  bool uploadAudioChunk(const String &sessionId, const uint8_t *data, size_t byteCount);
+  bool uploadAudioChunk(const String &sessionId,
+                        uint32_t sequence,
+                        const uint8_t *data,
+                        size_t byteCount,
+                        uint32_t &acknowledgedSequence);
   bool finishAudioSession(const String &sessionId, uint64_t completedAtEpoch);
   BackendStatus fetchStatus();
 

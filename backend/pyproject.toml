@@ -1,0 +1,18 @@
+[project]
+name = "yappl-backend"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi==0.115.6",
+  "uvicorn[standard]==0.32.1",
+  "pydantic-settings==2.7.0",
+  "cryptography==44.0.0",
+  "httpx==0.28.1",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

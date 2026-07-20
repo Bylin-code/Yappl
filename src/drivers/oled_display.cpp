@@ -43,27 +43,31 @@ void drawWifiIcon(bool connected, bool inverted) {
 }
 
 void drawBackendIcon(bool connected, bool inverted) {
-  // Small API/cloud-like status icon just left of Wi-Fi. It confirms the device
-  // reached the Yappl backend, which is different from merely joining Wi-Fi.
-  constexpr int16_t x = 96;
-  constexpr int16_t y = 5;
-
-  g_oled.setDrawColor(inverted ? 0 : 1);
-  g_oled.drawCircle(x + 4, y + 5, 3);
-  g_oled.drawCircle(x + 8, y + 4, 4);
-  g_oled.drawCircle(x + 12, y + 6, 3);
-  g_oled.drawHLine(x + 4, y + 9, 9);
-
-  if (connected) {
-    // Tiny check mark.
-    g_oled.drawLine(x + 6, y + 5, x + 8, y + 7);
-    g_oled.drawLine(x + 8, y + 7, x + 12, y + 3);
-  } else {
-    // Tiny X.
-    g_oled.drawLine(x + 6, y + 3, x + 12, y + 9);
-    g_oled.drawLine(x + 12, y + 3, x + 6, y + 9);
+  // Two interlocking links distinguish backend connectivity from Wi-Fi.
+  if (!connected) {
+    return;
   }
 
+  constexpr int16_t x = 101;
+  constexpr int16_t y = 5;
+  g_oled.setDrawColor(inverted ? 0 : 1);
+  g_oled.drawRFrame(x, y, 7, 5, 2);
+  g_oled.drawRFrame(x + 5, y + 3, 7, 5, 2);
+  g_oled.setDrawColor(1);
+}
+
+void drawUploadIcon(bool uploading, bool inverted) {
+  if (!uploading) {
+    return;
+  }
+
+  constexpr int16_t x = 92;
+  constexpr int16_t y = 4;
+  g_oled.setDrawColor(inverted ? 0 : 1);
+  g_oled.drawVLine(x + 3, y + 2, 7);
+  g_oled.drawLine(x, y + 5, x + 3, y + 2);
+  g_oled.drawLine(x + 6, y + 5, x + 3, y + 2);
+  g_oled.drawHLine(x, y + 10, 7);
   g_oled.setDrawColor(1);
 }
 
@@ -107,6 +111,7 @@ void OledDisplay::clear() {
 void OledDisplay::drawFaceFrame(const FaceFrame &frame,
                                 bool wifiConnected,
                                 bool backendConnected,
+                                bool audioUploading,
                                 bool timeSynced,
                                 uint8_t hour,
                                 uint8_t minute) {
@@ -129,6 +134,7 @@ void OledDisplay::drawFaceFrame(const FaceFrame &frame,
     g_oled.setDrawColor(1);
   }
   drawClock(timeSynced, hour, minute, frame.invert);
+  drawUploadIcon(audioUploading, frame.invert);
   drawBackendIcon(backendConnected, frame.invert);
   drawWifiIcon(wifiConnected, frame.invert);
   g_oled.sendBuffer();

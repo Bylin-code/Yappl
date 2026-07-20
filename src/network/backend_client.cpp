@@ -192,14 +192,19 @@ String BackendClient::startAudioSession(uint64_t startedAtEpoch, uint32_t sample
   return sessionId;
 }
 
-bool BackendClient::uploadAudioChunk(const String &sessionId, const uint8_t *data, size_t byteCount) {
+bool BackendClient::uploadAudioChunk(const String &sessionId,
+                                     uint32_t sequence,
+                                     const uint8_t *data,
+                                     size_t byteCount,
+                                     uint32_t &acknowledgedSequence) {
   if (!configured_ || sessionId.length() == 0 || data == nullptr || byteCount == 0) {
     return false;
   }
 
   HTTPClient http;
   http.setTimeout(AppConfig::backendHttpTimeoutMs);
-  const String path = "/device/session/audio?session_id=" + sessionId;
+  const String path = "/device/session/audio?session_id=" + sessionId +
+                      "&sequence=" + String(sequence);
   if (!http.begin(urlFor(path.c_str()))) {
     Serial.println(F("Backend audio upload failed: bad URL"));
     return false;
@@ -209,13 +214,17 @@ bool BackendClient::uploadAudioChunk(const String &sessionId, const uint8_t *dat
   addAuthHeader(http);
 
   const int code = http.POST(const_cast<uint8_t *>(data), byteCount);
+  const String response = http.getString();
   http.end();
 
   const bool ok = code >= 200 && code < 300;
+  acknowledgedSequence = ok
+                             ? static_cast<uint32_t>(jsonUnsignedValue(response, "acknowledged_sequence"))
+                             : 0;
   if (!ok) {
     Serial.printf("Backend audio upload failed: HTTP %d bytes=%u\n", code, static_cast<unsigned>(byteCount));
   }
-  return markRequestResult(ok);
+  return markRequestResult(ok && acknowledgedSequence == sequence);
 }
 
 bool BackendClient::finishAudioSession(const String &sessionId, uint64_t completedAtEpoch) {

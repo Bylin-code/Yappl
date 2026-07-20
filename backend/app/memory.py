@@ -2,6 +2,7 @@ import json
 import re
 import sqlite3
 import uuid
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -138,14 +139,78 @@ def upsert_entity(entity_id: str | None, entity_type: str, name: str, descriptio
     return next(item for item in list_entities() if item["id"] == entity_id)
 
 
+def _normalized_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _local_alias_candidates(transcript: str) -> list[str]:
+    """Return name-like tokens while avoiding ordinary sentence-start words."""
+    ignored = {"Today", "Tonight", "Tomorrow", "Yesterday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"}
+    candidates = re.findall(r"(?<![\w'-])(?:[A-Z][A-Za-z'-]{3,})(?![\w'-])", transcript)
+    return list(dict.fromkeys(value for value in candidates if value not in ignored))
+
+
+def discover_high_confidence_aliases(session_id: str, transcript: str) -> list[dict]:
+    """Persist only unique, near-exact local matches; ambiguous names are left alone."""
+    initialize_memory()
+    learned: list[dict] = []
+    entities = list_entities()
+    known_names = {
+        _normalized_name(name)
+        for entity in entities
+        for name in [entity["canonical_name"], *[alias["alias"] for alias in entity["aliases"]]]
+    }
+    with _connect() as db:
+        for candidate in _local_alias_candidates(transcript):
+            normalized = _normalized_name(candidate)
+            if len(normalized) < 5 or normalized in known_names:
+                continue
+            scored = sorted(
+                [
+                    (
+                        SequenceMatcher(None, normalized, _normalized_name(entity["canonical_name"])).ratio(),
+                        entity,
+                    )
+                    for entity in entities
+                ],
+                key=lambda item: item[0],
+            )
+            if not scored:
+                continue
+            best_score, best = scored[-1]
+            runner_up = scored[-2][0] if len(scored) > 1 else 0.0
+            # A one-character transcription variation in a five-letter name
+            # scores .80. The uniqueness margin prevents merging
+            # when two known names are similarly spelled.
+            if best_score < 0.80 or best_score - runner_up < 0.08:
+                continue
+            conflict = db.execute(
+                "SELECT entity_id FROM aliases WHERE alias=? COLLATE NOCASE AND entity_id!=? LIMIT 1",
+                (candidate, best["id"]),
+            ).fetchone()
+            if conflict:
+                continue
+            db.execute(
+                "INSERT OR IGNORE INTO aliases(entity_id,alias,confidence,source) VALUES(?,?,?,?)",
+                (best["id"], candidate, best_score, f"local:{session_id}"),
+            )
+            if db.execute("SELECT changes()").fetchone()[0]:
+                learned.append(
+                    {"entity_id": best["id"], "alias": candidate, "canonical_name": best["canonical_name"], "confidence": round(best_score, 3), "source": "local"}
+                )
+                known_names.add(normalized)
+    return learned
+
+
 def correct_transcript(session_id: str, session_folder: Path) -> dict:
-    """Apply only user-curated alias corrections and preserve the raw transcript."""
+    """Apply curated and uniquely high-confidence local aliases, preserving raw text."""
     initialize_memory()
     source = session_folder / "transcript.txt"
     raw_path = session_folder / "transcript.raw.txt"
     corrected_path = session_folder / "transcript.corrected.txt"
     raw = source.read_text().strip()
     raw_path.write_text(raw + "\n" if raw else "")
+    aliases_learned = discover_high_confidence_aliases(session_id, raw)
     corrected = raw
     changes: list[dict] = []
     with _connect() as db:
@@ -172,6 +237,7 @@ def correct_transcript(session_id: str, session_folder: Path) -> dict:
         "raw_transcript_file": str(raw_path),
         "corrected_transcript_file": str(corrected_path),
         "transcript_corrections": changes,
+        "memory_local_aliases_learned": aliases_learned,
     }
 
 
@@ -198,18 +264,25 @@ def learn_from_session(session_id: str, transcript: str) -> dict:
     from .summarization import generate_text
 
     entities = list_entities()
-    known = "\n".join(f"- {item['canonical_name']} [{item['id']}]: {item['description']}" for item in entities)
+    known = "\n".join(
+        f"- {item['canonical_name']} [{item['id']}], known aliases: "
+        f"{', '.join(alias['alias'] for alias in item['aliases'])}: {item['description']}"
+        for item in entities
+    )
     prompt = """Extract only explicit, durable personal facts from this private journal transcript.
 Return strict JSON with this shape:
 {"facts":[{"entity_id":"...","predicate":"short_snake_case","value":"..."}],
+"aliases":[{"entity_id":"...","alias":"exact transcript spelling","confidence":0.0}],
 "new_entities":[{"type":"person|project|organization","canonical_name":"...","description":"...","aliases":[],
 "facts":[{"predicate":"...","value":"..."}]}]}.
+Suggest an alias for a known entity only when the exact spelling occurs in the transcript, context clearly identifies
+the same entity, and confidence is at least 0.92. Never suggest an ordinary word or another real person's name.
 Use supplied entity IDs for known entities. Create a new entity only when the transcript clearly identifies a
 durable relationship, recurring role, owned project, or important organization. Never create entities for a
 one-off stranger, restaurant, store, ordinary location, meal, or uncertain/misheard name. Do not infer emotions,
 personality traits, diagnoses, temporary moods, or facts not directly stated. Do not save ordinary one-day events.
 Good memories include relationships, occupations, ownership of projects, stable preferences, and durable
-biographical context. If there is nothing durable, return {"facts":[],"new_entities":[]}. Return JSON only."""
+biographical context. If there is nothing durable, return {"facts":[],"aliases":[],"new_entities":[]}. Return JSON only."""
     try:
         text, provider, model = generate_text(f"{prompt}\n\nKnown entities:\n{known}", transcript, max_tokens=500)
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.IGNORECASE)
@@ -219,6 +292,7 @@ biographical context. If there is nothing durable, return {"facts":[],"new_entit
 
     valid_ids = {item["id"] for item in entities}
     learned = []
+    learned_aliases = []
     now = _now()
     with _connect() as db:
         for fact in payload.get("facts", [])[:20]:
@@ -234,6 +308,29 @@ biographical context. If there is nothing durable, return {"facts":[],"new_entit
             )
             if db.execute("SELECT changes()").fetchone()[0]:
                 learned.append({"entity_id": entity_id, "predicate": predicate, "value": value})
+        for suggestion in payload.get("aliases", [])[:20]:
+            entity_id = suggestion.get("entity_id")
+            alias = str(suggestion.get("alias", "")).strip()[:120]
+            try:
+                confidence = float(suggestion.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if entity_id not in valid_ids or len(alias) < 3 or confidence < 0.92:
+                continue
+            if re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", transcript, re.IGNORECASE) is None:
+                continue
+            conflict = db.execute(
+                "SELECT entity_id FROM aliases WHERE alias=? COLLATE NOCASE AND entity_id!=? LIMIT 1",
+                (alias, entity_id),
+            ).fetchone()
+            if conflict:
+                continue
+            db.execute(
+                "INSERT OR IGNORE INTO aliases(entity_id,alias,confidence,source) VALUES(?,?,?,?)",
+                (entity_id, alias, min(confidence, 1.0), f"ai:{session_id}"),
+            )
+            if db.execute("SELECT changes()").fetchone()[0]:
+                learned_aliases.append({"entity_id": entity_id, "alias": alias, "confidence": min(confidence, 1.0)})
     new_entities = []
     for item in payload.get("new_entities", [])[:10]:
         entity_type = str(item.get("type", "")).strip().lower()
@@ -262,4 +359,4 @@ biographical context. If there is nothing durable, return {"facts":[],"new_entit
             new_entities.append({"id": entity["id"], "canonical_name": entity["canonical_name"], "type": entity["type"]})
         except sqlite3.IntegrityError:
             continue
-    return {"memory_learning_status": "complete", "memory_facts_learned": learned, "memory_entities_learned": new_entities, "memory_provider": provider, "memory_model": model}
+    return {"memory_learning_status": "complete", "memory_facts_learned": learned, "memory_ai_aliases_learned": learned_aliases, "memory_entities_learned": new_entities, "memory_provider": provider, "memory_model": model}

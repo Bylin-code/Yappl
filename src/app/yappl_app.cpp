@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 
 #include "app/config.h"
 #include "app/output_patterns.h"
@@ -38,9 +39,17 @@ void YapplApp::begin() {
 
   // The three RTOS tasks share AppState, so access is protected by this mutex.
   stateMutex_ = xSemaphoreCreateMutex();
-  if (stateMutex_ == nullptr) {
-    Serial.println(F("Failed to create app state mutex"));
+  audioMutex_ = xSemaphoreCreateMutex();
+  if (stateMutex_ == nullptr || audioMutex_ == nullptr) {
+    Serial.println(F("Failed to create application mutexes"));
     return;
+  }
+
+  if (!validateHardware()) {
+    // Keep the local UI alive even if the selected PlatformIO profile does not
+    // perfectly match the connected module. Audio allocation below will fall
+    // back to internal RAM and report failure independently if necessary.
+    Serial.println(F("Hardware profile mismatch; continuing with available hardware"));
   }
 
   // Initialize drivers before tasks start. Once tasks are running, drivers are
@@ -68,7 +77,7 @@ void YapplApp::begin() {
   const TimeContext time = currentTimeContext();
   stateController_.begin(millis(), time);
   publishSensorState(false, lightRaw, lightLevelFromRaw(lightRaw), 0);
-  publishOutputState(stateController_.mode(), wifi_.isConnected(), backendConnected_, time.valid, time.hour, time.minute, 0, 0, 0);
+  publishOutputState(stateController_.mode(), wifi_.isConnected(), backendConnected_.load(), false, time.valid, time.hour, time.minute, 0, 0, 0);
 
   Serial.println(micReady_ ? F("INMP441 ready") : F("INMP441 failed"));
   Serial.printf("Clock %s %02u:%02u, last yap %s, boot mode %s\n",
@@ -81,6 +90,29 @@ void YapplApp::begin() {
   if (!startTasks()) {
     Serial.println(F("Failed to start RTOS tasks"));
   }
+}
+
+bool YapplApp::validateHardware() {
+  const uint32_t flashBytes = ESP.getFlashChipSize();
+  const bool psramReady = psramFound();
+  const uint32_t psramBytes = ESP.getPsramSize();
+  Serial.printf("Hardware: flash=%u MB psram=%s (%u MB) heap=%u bytes\n",
+                static_cast<unsigned>(flashBytes / (1024 * 1024)),
+                psramReady ? "ready" : "missing",
+                static_cast<unsigned>(psramBytes / (1024 * 1024)),
+                static_cast<unsigned>(ESP.getFreeHeap()));
+
+  if (flashBytes < AppConfig::requiredFlashBytes) {
+    Serial.printf("Expected at least %u MB flash\n",
+                  static_cast<unsigned>(AppConfig::requiredFlashBytes / (1024 * 1024)));
+    return false;
+  }
+  if (AppConfig::requirePsram && (!psramReady || psramBytes < AppConfig::requiredPsramBytes)) {
+    Serial.printf("Expected at least %u MB PSRAM\n",
+                  static_cast<unsigned>(AppConfig::requiredPsramBytes / (1024 * 1024)));
+    return false;
+  }
+  return true;
 }
 
 void YapplApp::update() {
@@ -291,12 +323,11 @@ void YapplApp::resetAudioStream() {
   audioCaptureActive_ = false;
   recordedBytes_ = 0;
   droppedAudioBytes_ = 0;
-  activeBackendSessionId_ = "";
-  portENTER_CRITICAL(&audioRingMux_);
+  xSemaphoreTake(audioMutex_, portMAX_DELAY);
   audioRingWriteIndex_ = 0;
   audioRingReadIndex_ = 0;
   audioRingBytesUsed_ = 0;
-  portEXIT_CRITICAL(&audioRingMux_);
+  xSemaphoreGive(audioMutex_);
 }
 
 void YapplApp::pushAudioSamples(const int32_t *samples, size_t sampleCount) {
@@ -318,14 +349,13 @@ void YapplApp::pushAudioSamples(const int32_t *samples, size_t sampleCount) {
   const uint8_t *bytes = reinterpret_cast<const uint8_t *>(pcmSamples);
   const size_t byteCount = samplesToCopy * sizeof(pcmSamples[0]);
 
-  portENTER_CRITICAL(&audioRingMux_);
+  xSemaphoreTake(audioMutex_, portMAX_DELAY);
   for (size_t i = 0; i < byteCount; ++i) {
     if (audioRingBytesUsed_ == AppConfig::audioRollingBufferBytes) {
-      // Rolling buffer policy: discard oldest bytes so the newest live audio is
-      // retained for future real-time inference.
-      audioRingReadIndex_ = (audioRingReadIndex_ + 1) % AppConfig::audioRollingBufferBytes;
-      --audioRingBytesUsed_;
-      ++droppedAudioBytes_;
+      // Preserve already-buffered (and possibly in-flight) audio. Overwriting
+      // the oldest bytes could mutate a batch while HTTP is retrying it.
+      droppedAudioBytes_.fetch_add(byteCount - i);
+      break;
     }
 
     audioRingBuffer_[audioRingWriteIndex_] = bytes[i];
@@ -333,23 +363,31 @@ void YapplApp::pushAudioSamples(const int32_t *samples, size_t sampleCount) {
     ++audioRingBytesUsed_;
   }
   recordedBytes_ += byteCount;
-  portEXIT_CRITICAL(&audioRingMux_);
+  xSemaphoreGive(audioMutex_);
 }
 
-size_t YapplApp::popAudioBatch(uint8_t *destination, size_t maxBytes) {
+size_t YapplApp::peekAudioBatch(uint8_t *destination, size_t maxBytes) {
   if (audioRingBuffer_ == nullptr || destination == nullptr || maxBytes == 0) {
     return 0;
   }
 
-  portENTER_CRITICAL(&audioRingMux_);
+  xSemaphoreTake(audioMutex_, portMAX_DELAY);
   const size_t toRead = std::min(maxBytes, audioRingBytesUsed_);
+  size_t readIndex = audioRingReadIndex_;
   for (size_t i = 0; i < toRead; ++i) {
-    destination[i] = audioRingBuffer_[audioRingReadIndex_];
-    audioRingReadIndex_ = (audioRingReadIndex_ + 1) % AppConfig::audioRollingBufferBytes;
+    destination[i] = audioRingBuffer_[readIndex];
+    readIndex = (readIndex + 1) % AppConfig::audioRollingBufferBytes;
   }
-  audioRingBytesUsed_ -= toRead;
-  portEXIT_CRITICAL(&audioRingMux_);
+  xSemaphoreGive(audioMutex_);
   return toRead;
+}
+
+void YapplApp::commitAudioBatch(size_t byteCount) {
+  xSemaphoreTake(audioMutex_, portMAX_DELAY);
+  const size_t committed = std::min(byteCount, audioRingBytesUsed_);
+  audioRingReadIndex_ = (audioRingReadIndex_ + committed) % AppConfig::audioRollingBufferBytes;
+  audioRingBytesUsed_ -= committed;
+  xSemaphoreGive(audioMutex_);
 }
 
 uint8_t YapplApp::micLevelFromSamples(const int32_t *samples, size_t sampleCount) const {
@@ -404,6 +442,7 @@ void YapplApp::publishSensorState(bool buttonPressed, int lightRaw, uint8_t ligh
 void YapplApp::publishOutputState(AppMode mode,
                                   bool wifiConnected,
                                   bool backendConnected,
+                                  bool audioUploading,
                                   bool timeSynced,
                                   uint8_t currentHour,
                                   uint8_t currentMinute,
@@ -419,6 +458,7 @@ void YapplApp::publishOutputState(AppMode mode,
   state_.mode = mode;
   state_.wifiConnected = wifiConnected;
   state_.backendConnected = backendConnected;
+  state_.audioUploading = audioUploading;
   state_.timeSynced = timeSynced;
   state_.currentHour = currentHour;
   state_.currentMinute = currentMinute;
@@ -472,12 +512,12 @@ void YapplApp::outputTask() {
       pendingBackendSessionFinish_ = true;
       audioCaptureActive_ = false;
       size_t bufferedBytes = 0;
-      portENTER_CRITICAL(&audioRingMux_);
+      xSemaphoreTake(audioMutex_, portMAX_DELAY);
       bufferedBytes = audioRingBytesUsed_;
-      portEXIT_CRITICAL(&audioRingMux_);
+      xSemaphoreGive(audioMutex_);
       Serial.printf("Audio session finish requested, buffered=%u dropped=%u\n",
                     static_cast<unsigned>(bufferedBytes),
-                    static_cast<unsigned>(droppedAudioBytes_));
+                    static_cast<unsigned>(droppedAudioBytes_.load()));
       if (time.valid) {
         rememberLastYapEpoch(time.nowEpoch);
         time = currentTimeContext();
@@ -496,13 +536,14 @@ void YapplApp::outputTask() {
 
     publishOutputState(mode,
                        wifi_.isConnected(),
-                       backendConnected_,
+                       backendConnected_.load(),
+                       audioUploading_.load(),
                        time.valid,
                        time.hour,
                        time.minute,
                        ledBrightness,
                        piezoFrequencyHz,
-                       recordedBytes_);
+                       recordedBytes_.load());
 
     // Keep a steady task cadence even if one iteration runs a little late.
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(AppConfig::outputTaskPeriodMs));
@@ -528,7 +569,7 @@ void YapplApp::sensorTask() {
       const size_t samplesRead = mic_.read(micSamples_, AppConfig::micSampleCount);
       if (samplesRead > 0) {
         micLevel = micLevelFromSamples(micSamples_, samplesRead);
-        if (audioCaptureActive_) {
+        if (audioCaptureActive_.load()) {
           pushAudioSamples(micSamples_, samplesRead);
         }
       }
@@ -569,6 +610,7 @@ void YapplApp::displayTask() {
       display_.drawFaceFrame(frame,
                              snapshot.wifiConnected,
                              snapshot.backendConnected,
+                             snapshot.audioUploading,
                              snapshot.timeSynced,
                              snapshot.currentHour,
                              snapshot.currentMinute);
@@ -587,14 +629,16 @@ void YapplApp::networkTask() {
 
   while (true) {
     const uint32_t nowMs = millis();
-    bool connected = backendConnected_;
+    bool connected = backendConnected_.load();
 
     if (backendReady_ && wifi_.isConnected()) {
       if (pendingBackendSessionStart_) {
+        activeBackendSessionId_ = "";
+        nextAudioSequence_ = 1;
         const TimeContext time = currentTimeContext();
         activeBackendSessionId_ = backend_.startAudioSession(time.valid ? time.nowEpoch : 0, AppConfig::sampleRateHz);
         pendingBackendSessionStart_ = activeBackendSessionId_.length() == 0;
-        connected = activeBackendSessionId_.length() > 0 || connected;
+        connected = activeBackendSessionId_.length() > 0;
         if (activeBackendSessionId_.length() > 0) {
           Serial.printf("Audio session started: %s\n", activeBackendSessionId_.c_str());
         }
@@ -604,44 +648,61 @@ void YapplApp::networkTask() {
       while (activeBackendSessionId_.length() > 0 &&
              audioUploadBatch_ != nullptr &&
              batchesUploadedThisPass < AppConfig::audioUploadBatchesPerNetworkPass) {
-        const size_t batchBytes = popAudioBatch(audioUploadBatch_, AppConfig::audioUploadBatchBytes);
+        const size_t batchBytes = peekAudioBatch(audioUploadBatch_, AppConfig::audioUploadBatchBytes);
         if (batchBytes == 0) {
           break;
         }
-        connected = backend_.uploadAudioChunk(activeBackendSessionId_,
-                                              audioUploadBatch_,
-                                              batchBytes) ||
-                    connected;
+        uint32_t acknowledgedSequence = 0;
+        const bool uploaded = backend_.uploadAudioChunk(activeBackendSessionId_,
+                                                        nextAudioSequence_,
+                                                        audioUploadBatch_,
+                                                        batchBytes,
+                                                        acknowledgedSequence);
+        if (uploaded && acknowledgedSequence == nextAudioSequence_) {
+          commitAudioBatch(batchBytes);
+          ++nextAudioSequence_;
+          connected = true;
+        } else {
+          connected = false;
+          break;
+        }
         ++batchesUploadedThisPass;
       }
 
       size_t bufferedBytes = 0;
-      portENTER_CRITICAL(&audioRingMux_);
+      xSemaphoreTake(audioMutex_, portMAX_DELAY);
       bufferedBytes = audioRingBytesUsed_;
-      portEXIT_CRITICAL(&audioRingMux_);
+      xSemaphoreGive(audioMutex_);
+      audioUploading_.store(activeBackendSessionId_.length() > 0 &&
+                            (audioCaptureActive_.load() || bufferedBytes > 0));
       if (pendingBackendSessionFinish_ && activeBackendSessionId_.length() > 0 && bufferedBytes == 0) {
-        if (backend_.finishAudioSession(activeBackendSessionId_, pendingBackendYapCompletedEpoch_)) {
+        if (backend_.finishAudioSession(activeBackendSessionId_, pendingBackendYapCompletedEpoch_.load())) {
           Serial.printf("Audio session finished: %s bytes=%u dropped=%u\n",
                         activeBackendSessionId_.c_str(),
-                        static_cast<unsigned>(recordedBytes_),
-                        static_cast<unsigned>(droppedAudioBytes_));
+                        static_cast<unsigned>(recordedBytes_.load()),
+                        static_cast<unsigned>(droppedAudioBytes_.load()));
           pendingBackendSessionFinish_ = false;
           activeBackendSessionId_ = "";
+          audioUploading_.store(false);
           connected = true;
+        } else {
+          connected = false;
         }
       }
 
       if (pendingBackendYapCompleted_ && !pendingBackendSessionFinish_) {
-        if (backend_.sendYapCompleted(pendingBackendYapCompletedEpoch_)) {
+        if (backend_.sendYapCompleted(pendingBackendYapCompletedEpoch_.load())) {
           pendingBackendYapCompleted_ = false;
           connected = true;
+        } else {
+          connected = false;
         }
       }
 
       if (nowMs - lastStatusMs >= AppConfig::backendStatusPeriodMs) {
         lastStatusMs = nowMs;
         const BackendStatus status = backend_.fetchStatus();
-        connected = status.requestOk || connected;
+        connected = status.requestOk;
         applyBackendStatus(status);
       }
 
@@ -651,11 +712,12 @@ void YapplApp::networkTask() {
         const BackendStatus status = backend_.ping(snapshot.wifiConnected,
                                                    snapshot.timeSynced,
                                                    StateController::modeName(snapshot.mode));
-        connected = status.requestOk || connected;
+        connected = status.requestOk;
         applyBackendStatus(status);
       }
     } else {
       connected = false;
+      audioUploading_.store(false);
     }
 
     backendConnected_ = connected;

@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     yappl_transcription_timeout_seconds: int = 1800
     yappl_summary_enabled: bool = True
     yappl_summary_timeout_seconds: int = 120
+    yappl_audio_chunk_max_bytes: int = 16384
+    yappl_session_max_bytes: int = 128 * 1024 * 1024
+    yappl_processing_poll_seconds: float = 1.0
     yappl_settings_secret: str = "change-me-before-storing-api-keys"
 
     # Environment keys are a convenient fallback. Keys saved through the

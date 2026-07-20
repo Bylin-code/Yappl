@@ -26,6 +26,7 @@ struct AppState {
   // are unavailable or the USB monitor is flaky.
   bool wifiConnected = false;
   bool backendConnected = false;
+  bool audioUploading = false;
   bool timeSynced = false;
   uint8_t currentHour = 0;
   uint8_t currentMinute = 0;

@@ -20,6 +20,12 @@ curl http://localhost:8000/health
 docker compose ps
 ```
 
+Run the backend test suite in the reproducible container environment:
+
+```bash
+docker compose run --rm api python -m unittest discover -s tests -v
+```
+
 View logs:
 
 ```bash

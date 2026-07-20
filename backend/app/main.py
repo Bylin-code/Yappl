@@ -1,23 +1,36 @@
 import json
 import sqlite3
 import subprocess
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException, Query, Response
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .settings import settings
 from .memory import correct_transcript, learn_from_session, list_entities, upsert_entity
 from .provider_config import PROVIDERS, public_provider_config, save_provider_config
 from .summarization import summarize_text, summarize_transcript, summary_path
 from .transcription import transcribe_mp3, transcript_path
+from .session_store import (
+    append_chunk,
+    claim_jobs,
+    enqueue_job,
+    finish_job,
+    initialize as initialize_session_store,
+    load_metadata,
+    register_session,
+    recover_interrupted_jobs,
+    save_metadata,
+)
 
 
 app = FastAPI(title="Yappl Backend")
+processing_wakeup = threading.Event()
 
 # This is intentionally in-memory for the first connection milestone. It proves
 # the ESP32 can reach the backend before we add Postgres or cloud storage.
@@ -38,7 +51,7 @@ class YapCompleted(BaseModel):
 
 class SessionStart(BaseModel):
     device_id: str
-    sample_rate_hz: int
+    sample_rate_hz: int = Field(ge=8000, le=48000)
     sample_format: str = "pcm_s16le"
     started_at_epoch: Optional[int] = None
 
@@ -70,8 +83,8 @@ class MemoryEntityInput(BaseModel):
     type: str
     canonical_name: str
     description: str = ""
-    aliases: list[str] = []
-    facts: list[MemoryFactInput] = []
+    aliases: list[str] = Field(default_factory=list)
+    facts: list[MemoryFactInput] = Field(default_factory=list)
 
 
 def require_device_secret(authorization: str | None) -> None:
@@ -323,11 +336,15 @@ def run_session_transcription(session_id: str) -> None:
     if metadata.get("summary_status") == "complete":
         transcript = transcript_path(metadata_path(session_id).parent).read_text().strip()
         metadata.update(learn_from_session(session_id, transcript))
+    metadata["state"] = "complete"
     write_metadata(session_id, metadata)
     print("summary finished:", session_id, f"status={metadata.get('summary_status')}", flush=True)
 
 
 def read_metadata(session_id: str) -> dict:
+    stored = load_metadata(session_id)
+    if stored is not None:
+        return stored
     path = metadata_path(session_id)
     if not path.exists():
       raise HTTPException(status_code=404, detail="session not found")
@@ -341,7 +358,32 @@ def write_metadata(session_id: str, metadata: dict) -> None:
     existing_path = metadata_path(session_id)
     folder = existing_path.parent if existing_path.exists() else session_dir_for_device(device_id, session_id)
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    save_metadata(metadata, folder / "metadata.json", now_iso())
+
+
+def processing_worker() -> None:
+    """Process durable queued jobs and recover jobs interrupted by a restart."""
+    while True:
+        for session_id in claim_jobs(now_iso()):
+            try:
+                run_session_transcription(session_id)
+            except Exception as error:
+                finish_job(session_id, now_iso(), str(error)[:2000])
+            else:
+                metadata = read_metadata(session_id)
+                failed = metadata.get("transcription_status") == "failed" or metadata.get("summary_status") == "failed"
+                finish_job(session_id, now_iso(), "processing failed; inspect session metadata" if failed else None)
+        processing_wakeup.wait(settings.yappl_processing_poll_seconds)
+        processing_wakeup.clear()
+
+
+@app.on_event("startup")
+def start_processing_worker() -> None:
+    initialize_session_store()
+    recover_interrupted_jobs(now_iso())
+    if not any(thread.name == "yappl-processing" for thread in threading.enumerate()):
+        threading.Thread(target=processing_worker, name="yappl-processing", daemon=True).start()
+    processing_wakeup.set()
 
 
 def convert_pcm_to_mp3(session_id: str, metadata: dict) -> dict:
@@ -484,8 +526,10 @@ def session_start(payload: SessionStart, authorization: str | None = Header(defa
         "summary_status": "pending",
         "summary_file": None,
         "summary_bytes": 0,
+        "state": "recording",
+        "last_audio_sequence": 0,
     }
-    write_metadata(session_id, metadata)
+    register_session(metadata, metadata_path(session_id, payload.device_id), now_iso())
     audio_path(session_id, payload.device_id).write_bytes(b"")
 
     print("session started:", payload.device_id, session_id, flush=True)
@@ -499,18 +543,34 @@ def session_start(payload: SessionStart, authorization: str | None = Header(defa
 @app.post("/device/session/audio")
 async def session_audio(
     session_id: str = Query(...),
+    sequence: int = Query(..., ge=1),
     authorization: str | None = Header(default=None),
     body: bytes = Body(...),
 ) -> dict:
     """Append one raw PCM audio chunk to a session's audio file."""
     require_device_secret(authorization)
 
+    if not body:
+        raise HTTPException(status_code=400, detail="empty audio chunk")
+    if len(body) > settings.yappl_audio_chunk_max_bytes:
+        raise HTTPException(status_code=413, detail="audio chunk too large")
     metadata = read_metadata(session_id)
-    with audio_path(session_id).open("ab") as audio_file:
-        audio_file.write(body)
-
-    metadata["audio_bytes"] = int(metadata.get("audio_bytes", 0)) + len(body)
-    metadata["last_audio_chunk_at"] = now_iso()
+    # Transparently register legacy file-only sessions in the transactional
+    # ledger before accepting their next chunk.
+    save_metadata(metadata, metadata_path(session_id), now_iso())
+    if int(metadata.get("audio_bytes", 0)) + len(body) > settings.yappl_session_max_bytes:
+        raise HTTPException(status_code=413, detail="session audio limit exceeded")
+    try:
+        metadata, duplicate = append_chunk(
+            session_id, sequence, body, audio_path(session_id), metadata, now_iso()
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (ValueError, IndexError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    # Keep the human-readable metadata mirror atomic and synchronized.
     write_metadata(session_id, metadata)
 
     return {
@@ -518,13 +578,14 @@ async def session_audio(
         "session_id": session_id,
         "received_bytes": len(body),
         "audio_bytes": metadata["audio_bytes"],
+        "acknowledged_sequence": sequence,
+        "duplicate": duplicate,
     }
 
 
 @app.post("/device/session/finish")
 def session_finish(
     payload: SessionFinish,
-    background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
 ) -> dict:
     """Mark a durable audio session complete."""
@@ -533,15 +594,32 @@ def session_finish(
     metadata = read_metadata(payload.session_id)
     if metadata["device_id"] != payload.device_id:
         raise HTTPException(status_code=400, detail="device/session mismatch")
+    if metadata.get("state") == "complete":
+        return {
+            "status": "ok",
+            "session_id": payload.session_id,
+            "audio_bytes": metadata["audio_bytes"],
+            "mp3_status": metadata.get("mp3_status"),
+            "transcription_status": metadata.get("transcription_status"),
+            "last_yap_completed_at_epoch": metadata.get("completed_at_epoch"),
+            "duplicate": True,
+        }
+    if metadata.get("state") != "recording":
+        raise HTTPException(status_code=409, detail="session cannot be finished from its current state")
 
     metadata["completed_at"] = now_iso()
     metadata["completed_at_epoch"] = payload.completed_at_epoch
+    metadata["state"] = "processing"
     metadata = convert_pcm_to_mp3(payload.session_id, metadata)
     metadata["transcription_status"] = "queued" if metadata.get("mp3_status") == "ready" else "skipped"
     write_metadata(payload.session_id, metadata)
 
     if metadata["transcription_status"] == "queued":
-        background_tasks.add_task(run_session_transcription, payload.session_id)
+        enqueue_job(payload.session_id, now_iso())
+        processing_wakeup.set()
+    else:
+        metadata["state"] = "complete"
+        write_metadata(payload.session_id, metadata)
 
     state = read_device_state(payload.device_id)
     state = refresh_state_from_sessions(payload.device_id, state)
@@ -621,7 +699,7 @@ def session_summary_download(session_id: str, authorization: str | None = Header
 
 
 @app.post("/device/session/{session_id}/summary/retry")
-def retry_session_summary(session_id: str, background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)) -> dict:
+def retry_session_summary(session_id: str, authorization: str | None = Header(default=None)) -> dict:
     """Retry summary generation without retranscribing the audio."""
     require_device_secret(authorization)
     metadata = read_metadata(session_id)
@@ -631,19 +709,9 @@ def retry_session_summary(session_id: str, background_tasks: BackgroundTasks, au
     metadata.pop("summary_error", None)
     write_metadata(session_id, metadata)
 
-    def run_retry() -> None:
-        correction = correct_transcript(session_id, metadata_path(session_id).parent)
-        result = summarize_transcript(metadata_path(session_id).parent)
-        current = read_metadata(session_id)
-        current.update(correction)
-        current.update(result)
-        if current.get("summary_status") == "complete":
-            transcript = transcript_path(metadata_path(session_id).parent).read_text().strip()
-            current.update(learn_from_session(session_id, transcript))
-        current["summary_completed_at"] = now_iso()
-        write_metadata(session_id, current)
-
-    background_tasks.add_task(run_retry)
+    metadata["transcription_status"] = "queued"
+    enqueue_job(session_id, now_iso())
+    processing_wakeup.set()
     return {"status": "ok", "session_id": session_id, "summary_status": "queued"}
 
 

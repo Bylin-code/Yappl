@@ -7,6 +7,11 @@ namespace yappl {
 // Centralized hardware map and behavior tuning. This file is the first place to
 // edit when changing pins, fake time, task rates, or state durations.
 struct AppConfig {
+  // This project targets an ESP32-S3 module with 16 MB flash and 8 MB OPI
+  // PSRAM. Boot stops early if a different module is selected accidentally.
+  static constexpr uint32_t requiredFlashBytes = 16 * 1024 * 1024;
+  static constexpr uint32_t requiredPsramBytes = 8 * 1024 * 1024;
+  static constexpr bool requirePsram = true;
   // INMP441 sample rate. 16 kHz is enough for speech experiments and keeps
   // buffers smaller than 44.1/48 kHz audio.
   static constexpr uint32_t sampleRateHz = 16000;
