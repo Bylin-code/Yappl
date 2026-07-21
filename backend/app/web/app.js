@@ -1,8 +1,11 @@
-const state = { sessions: [], memory: null, selectedDate: null, memoryCategory: "person", yearOffset: 0 };
+const state = { sessions: [], memory: null, selectedDate: null, memoryCategory: "person", yearOffset: 0, journalPeriod: "daily", periodSummaries: {} };
 const $ = (selector) => document.querySelector(selector);
 
 function localDateKey(epoch) {
   const date = new Date(epoch * 1000);
+  // Journal days roll over at 8 AM local time, so late-night sessions after
+  // midnight still appear on the previous day's heatmap square.
+  date.setHours(date.getHours() - 8);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
@@ -88,6 +91,73 @@ function buildHeatmap() {
   $("#total-yaps").textContent = state.sessions.length;
 }
 
+function readablePeriodDate(value, includeYear = true) {
+  return new Date(`${value}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric", ...(includeYear ? { year: "numeric" } : {}) });
+}
+
+function periodTitle(periodType, item) {
+  if (periodType === "weekly") return `${readablePeriodDate(item.period_start, false)} – ${readablePeriodDate(item.period_end)}`;
+  if (periodType === "monthly") return new Date(`${item.period_start}T12:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  return new Date(`${item.period_start}T12:00:00`).getFullYear().toString();
+}
+
+function renderPeriodSummaries(periodType, items) {
+  const container = $("#period-summaries");
+  if (!items.length) {
+    container.innerHTML = `<div class="period-loading">No completed ${periodType === "weekly" ? "weeks" : periodType === "monthly" ? "months" : "years"} with journal entries yet.</div>`;
+    return;
+  }
+  container.innerHTML = `<div class="period-grid">${items.map((item) => `<button class="period-preview-card" type="button" data-period-id="${escapeHtml(item.id)}"><span class="period-preview-label">${periodType === "weekly" ? "Week" : periodType === "monthly" ? "Month" : "Year"}</span><h2>${escapeHtml(periodTitle(periodType, item))}</h2><p>${escapeHtml(item.summary_excerpt || item.error || "Summary is not available.")}</p><small>${item.session_count} ${item.session_count === 1 ? "session" : "sessions"} · ${Math.round(item.duration_seconds / 60)} min</small></button>`).join("")}</div>`;
+  container.querySelectorAll("[data-period-id]").forEach((button) => button.addEventListener("click", () => renderPeriodDetail(periodType, items.find((item) => item.id === button.dataset.periodId))));
+}
+
+function renderPeriodDetail(periodType, item) {
+  const container = $("#period-summaries");
+  const sessionLinks = item.session_ids.map((sessionId) => {
+    const session = state.sessions.find((candidate) => candidate.session_id === sessionId);
+    if (!session) return "";
+    const key = localDateKey(session.completed_at_epoch);
+    const label = new Date(`${key}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: periodType === "yearly" ? "numeric" : undefined });
+    return `<button type="button" data-period-day="${key}">${label}</button>`;
+  }).join("");
+  container.innerHTML = `<article class="period-detail"><button class="back-button period-back" type="button">← Back to ${periodType === "weekly" ? "weeks" : periodType === "monthly" ? "months" : "years"}</button><div class="period-detail-heading"><div><span>${periodType === "weekly" ? "Weekly" : periodType === "monthly" ? "Monthly" : "Yearly"} reflection</span><h2>${escapeHtml(periodTitle(periodType, item))}</h2></div><small>${item.session_count} ${item.session_count === 1 ? "session" : "sessions"} · ${Math.round(item.duration_seconds / 60)} min</small></div><p class="period-full-summary ${item.status === "complete" ? "" : "no-summary"}">${escapeHtml(item.summary || item.error || "Summary is not available.")}</p><div class="period-days"><span>Included days</span>${sessionLinks}</div></article>`;
+  container.querySelector(".period-back").addEventListener("click", () => renderPeriodSummaries(periodType, state.periodSummaries[periodType]));
+  container.querySelectorAll("[data-period-day]").forEach((button) => button.addEventListener("click", () => {
+    switchJournalPeriod("daily");
+    selectDay(button.dataset.periodDay);
+  }));
+}
+
+async function switchJournalPeriod(periodType) {
+  state.journalPeriod = periodType;
+  document.querySelectorAll("[data-journal-period]").forEach((button) => {
+    const active = button.dataset.journalPeriod === periodType;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active);
+  });
+  const daily = periodType === "daily";
+  $("#daily-heatmap").hidden = !daily;
+  $("#day-detail").hidden = !daily;
+  $("#period-summaries").hidden = daily;
+  $("#journal-title").textContent = daily ? "A year in yaps" : periodType === "weekly" ? "Weeks in review" : periodType === "monthly" ? "Months in review" : "Years in review";
+  if (daily) return;
+  const container = $("#period-summaries");
+  if (state.periodSummaries[periodType]) {
+    renderPeriodSummaries(periodType, state.periodSummaries[periodType]);
+    return;
+  }
+  container.innerHTML = `<div class="period-loading">Building ${periodType} summaries…</div>`;
+  try {
+    const response = await fetch(`/api/journal/period-summaries?period_type=${periodType}`);
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || "Unable to load summaries");
+    state.periodSummaries[periodType] = result.summaries;
+    if (state.journalPeriod === periodType) renderPeriodSummaries(periodType, result.summaries);
+  } catch (error) {
+    container.innerHTML = `<div class="period-loading">${escapeHtml(error.message)}</div>`;
+  }
+}
+
 function showTooltip(event, date, entries, minutes) {
   const tooltip = $("#tooltip");
   const previews = entries.map((entry) => entry.summary_excerpt).filter(Boolean);
@@ -167,7 +237,15 @@ function renderMemory() {
   if (!state.memory) { content.innerHTML = `<p class="no-summary">Loading memory…</p>`; return; }
   if (state.memoryCategory === "pending") {
     const items = state.memory.pending_entities;
-    content.innerHTML = items.length ? `<div class="memory-grid">${items.map((item) => `<article class="memory-card"><h3>${escapeHtml(item.canonical_name)}</h3><p>${escapeHtml(item.description)} · ${item.mention_count} mention</p></article>`).join("")}</div>` : `<p class="no-summary">No memories are waiting for another mention.</p>`;
+    content.innerHTML = items.length ? `<div class="memory-grid">${items.map((item) => `<button class="memory-card" data-pending-key="${escapeHtml(item.normalized_key)}"><h3>${escapeHtml(item.canonical_name)}</h3><p>${escapeHtml(item.description)} · Recommended: ${escapeHtml(item.type)} · ${item.mention_count} mention</p></button>`).join("")}</div>` : `<p class="no-summary">No memories are waiting for another mention.</p>`;
+    content.querySelectorAll("[data-pending-key]").forEach((button) => button.addEventListener("click", () => {
+      const pending = items.find((item) => item.normalized_key === button.dataset.pendingKey);
+      let aliases = [];
+      let facts = [];
+      try { aliases = JSON.parse(pending.aliases_json || "[]").map((alias) => ({ alias })); } catch (_) { aliases = []; }
+      try { facts = JSON.parse(pending.facts_json || "[]"); } catch (_) { facts = []; }
+      renderMemoryForm({ type: pending.type, canonical_name: pending.canonical_name, description: pending.description, aliases, facts }, pending.normalized_key);
+    }));
     return;
   }
   const items = state.memory.categories[state.memoryCategory] || [];
@@ -178,8 +256,90 @@ function renderMemory() {
 function showMemoryDetail(item) {
   const aliases = item.aliases?.map((alias) => alias.alias).filter((alias) => alias.toLowerCase() !== item.canonical_name.toLowerCase()) || [];
   const facts = item.facts || [];
-  $("#memory-content").innerHTML = `<article class="memory-detail"><button class="back-button">← Back to ${state.memoryCategory}s</button><h2>${escapeHtml(item.canonical_name)}</h2><p class="description">${escapeHtml(item.description || "No description yet.")}</p>${aliases.length ? `<p class="description"><strong>Also known as:</strong> ${aliases.map(escapeHtml).join(", ")}</p>` : ""}<h3>What Yappl remembers</h3><ul class="fact-list">${facts.length ? facts.map((fact) => `<li><strong>${escapeHtml(fact.predicate.replaceAll("_", " "))}</strong><span>${escapeHtml(fact.value)}</span></li>`).join("") : `<li><span>No additional details yet.</span></li>`}</ul></article>`;
+  $("#memory-content").innerHTML = `<article class="memory-detail"><div class="memory-detail-actions"><button class="memory-secondary edit-memory" type="button">Edit</button><button class="memory-danger delete-memory" type="button">Delete</button></div><button class="back-button">← Back to ${state.memoryCategory}s</button><h2>${escapeHtml(item.canonical_name)}</h2><p class="description">${escapeHtml(item.description || "No description yet.")}</p>${aliases.length ? `<p class="description"><strong>Also known as:</strong> ${aliases.map(escapeHtml).join(", ")}</p>` : ""}<h3>What Yappl remembers</h3><ul class="fact-list">${facts.length ? facts.map((fact) => `<li><strong>${escapeHtml(fact.predicate.replaceAll("_", " "))}</strong><span>${escapeHtml(fact.value)}</span></li>`).join("") : `<li><span>No additional details yet.</span></li>`}</ul></article>`;
   $(".back-button").addEventListener("click", renderMemory);
+  $(".edit-memory").addEventListener("click", () => renderMemoryForm(item));
+  $(".delete-memory").addEventListener("click", async () => {
+    if (!window.confirm(`Delete ${item.canonical_name} and all of its remembered information?`)) return;
+    try {
+      const response = await fetch(`/api/memory/entities/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error((await response.json()).detail || "Unable to delete memory");
+      await refreshMemory();
+    } catch (error) { window.alert(error.message); }
+  });
+}
+
+function factEditorRow(fact = {}) {
+  return `<div class="fact-editor-row"><input name="predicate" value="${escapeHtml(fact.predicate || "")}" placeholder="Relationship, job, usual activity…" aria-label="Fact label"><input name="value" value="${escapeHtml(fact.value || "")}" placeholder="What should Yappl remember?" aria-label="Fact value"><button class="remove-fact" type="button" aria-label="Remove fact">×</button></div>`;
+}
+
+function wireFactRows(form) {
+  form.querySelectorAll(".remove-fact").forEach((button) => button.addEventListener("click", () => button.closest(".fact-editor-row").remove()));
+}
+
+function renderMemoryForm(item = null, pendingKey = null) {
+  const category = item?.type || (state.memoryCategory === "pending" ? "person" : state.memoryCategory);
+  const aliases = item?.aliases?.map((alias) => alias.alias).filter((alias) => alias.toLowerCase() !== item.canonical_name.toLowerCase()) || [];
+  const facts = item?.facts || [];
+  const options = categories.filter(([id]) => id !== "pending").map(([id, label]) => `<option value="${id}" ${id === category ? "selected" : ""}>${label}</option>`).join("");
+  $("#memory-content").innerHTML = `<form id="memory-editor" class="memory-editor"><h2>${pendingKey ? "Review pending memory" : item ? "Edit memory" : "Add memory"}</h2>${pendingKey ? `<p class="description">Review the suggested information and category before adding it to your memory library.</p>` : ""}<div class="memory-form-grid"><div class="memory-field"><label for="memory-name">Name</label><input id="memory-name" name="name" value="${escapeHtml(item?.canonical_name || "")}" required maxlength="120" autofocus></div><div class="memory-field"><label for="memory-type">${pendingKey ? "Recommended category" : "Category"}</label><select id="memory-type" name="type">${options}</select></div><div class="memory-field full"><label for="memory-description">Description</label><textarea id="memory-description" name="description" maxlength="1000" placeholder="A readable overview of who or what this is…">${escapeHtml(item?.description || "")}</textarea></div><div class="memory-field full"><label for="memory-aliases">Other names or spellings</label><textarea id="memory-aliases" name="aliases" placeholder="One per line, or separated by commas">${escapeHtml(aliases.join("\n"))}</textarea></div></div><div class="facts-editor"><label>Remembered facts</label><div class="fact-editor-rows">${facts.map(factEditorRow).join("")}</div><button class="add-fact" type="button">+ Add fact</button></div><p class="form-error" hidden></p><div class="memory-form-actions">${item?.id && !pendingKey ? `<button class="memory-danger delete-from-editor" type="button">Delete</button>` : ""}<span class="memory-form-spacer"></span><button class="memory-secondary cancel-memory" type="button">Cancel</button><button class="memory-primary" type="submit">${pendingKey ? "Add to library" : "Save memory"}</button></div></form>`;
+  const form = $("#memory-editor");
+  wireFactRows(form);
+  form.querySelector(".add-fact").addEventListener("click", () => {
+    form.querySelector(".fact-editor-rows").insertAdjacentHTML("beforeend", factEditorRow());
+    wireFactRows(form);
+  });
+  const submit = form.querySelector("[type=submit]");
+  const updatePromotionLabel = () => {
+    if (!pendingKey) return;
+    const selected = categories.find(([id]) => id === form.elements.type.value);
+    submit.textContent = `Add to ${selected ? selected[1] : "library"}`;
+  };
+  form.elements.type.addEventListener("change", updatePromotionLabel);
+  updatePromotionLabel();
+  form.querySelector(".delete-from-editor")?.addEventListener("click", async () => {
+    if (!window.confirm(`Delete ${item.canonical_name} and all of its remembered information?`)) return;
+    try {
+      const response = await fetch(`/api/memory/entities/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error((await response.json()).detail || "Unable to delete memory");
+      await refreshMemory();
+    } catch (problem) {
+      const error = form.querySelector(".form-error");
+      error.textContent = problem.message;
+      error.hidden = false;
+    }
+  });
+  form.querySelector(".cancel-memory").addEventListener("click", () => pendingKey ? renderMemory() : item ? showMemoryDetail(item) : renderMemory());
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const error = form.querySelector(".form-error");
+    submit.disabled = true;
+    error.hidden = true;
+    const factValues = [...form.querySelectorAll(".fact-editor-row")].map((row) => ({ predicate: row.querySelector("[name=predicate]").value.trim().replaceAll(" ", "_"), value: row.querySelector("[name=value]").value.trim() })).filter((fact) => fact.predicate && fact.value);
+    const payload = { id: item?.id || null, type: form.elements.type.value, canonical_name: form.elements.name.value.trim(), description: form.elements.description.value.trim(), aliases: form.elements.aliases.value.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean), facts: factValues };
+    try {
+      const url = pendingKey ? `/api/memory/pending/${encodeURIComponent(pendingKey)}/promote` : item ? `/api/memory/entities/${encodeURIComponent(item.id)}` : "/api/memory/entities";
+      const response = await fetch(url, { method: pendingKey ? "POST" : item ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "Unable to save memory");
+      state.memoryCategory = result.entity.type;
+      await refreshMemory(result.entity.id);
+    } catch (problem) {
+      error.textContent = problem.message;
+      error.hidden = false;
+      submit.disabled = false;
+    }
+  });
+}
+
+async function refreshMemory(showEntityId = null) {
+  const response = await fetch("/api/memory/library");
+  if (!response.ok) throw new Error("Unable to refresh memory");
+  state.memory = await response.json();
+  buildMemoryTabs();
+  const items = state.memory.categories[state.memoryCategory] || [];
+  const entity = showEntityId ? items.find((candidate) => candidate.id === showEntityId) : null;
+  if (entity) showMemoryDetail(entity); else renderMemory();
 }
 
 function switchView(view) {
@@ -204,6 +364,8 @@ async function load() {
 }
 
 document.querySelectorAll(".nav-link").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+document.querySelectorAll("[data-journal-period]").forEach((button) => button.addEventListener("click", () => switchJournalPeriod(button.dataset.journalPeriod)));
+$("#add-memory").addEventListener("click", () => renderMemoryForm());
 $("#older-year").addEventListener("click", () => { state.yearOffset += 1; buildHeatmap(); });
 $("#newer-year").addEventListener("click", () => { if (state.yearOffset > 0) state.yearOffset -= 1; buildHeatmap(); });
 switchView(location.hash === "#memory" ? "memory" : "journal");

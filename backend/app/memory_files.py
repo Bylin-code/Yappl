@@ -110,4 +110,11 @@ This directory is a readable mirror of `memory.sqlite3`. SQLite remains the sour
     )
     expected.add(readme)
 
+    # Remove stale mirrors left behind by entity deletion, renaming, or moving
+    # to another category. SQLite remains the source of truth.
+    for folder in CATEGORY_FOLDERS.values():
+        for path in (root / folder).glob("*.md"):
+            if path not in expected:
+                path.unlink()
+
     return root

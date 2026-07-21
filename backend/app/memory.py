@@ -27,6 +27,7 @@ def _connect() -> sqlite3.Connection:
 
 
 def initialize_memory() -> None:
+    should_seed = False
     with _connect() as db:
         db.executescript(
             """
@@ -80,9 +81,18 @@ def initialize_memory() -> None:
                 mention_count INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS memory_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             DROP TABLE IF EXISTS personal_attributes;
             """
         )
+        if db.execute("SELECT 1 FROM memory_meta WHERE key='initial_seeds_created'").fetchone() is None:
+            db.execute("INSERT INTO memory_meta(key,value) VALUES('initial_seeds_created','true')")
+            should_seed = True
+    if not should_seed:
+        return
     _seed_entity(
         "person_ylang",
         "person",
@@ -159,17 +169,27 @@ def canonicalize_known_aliases(text: str) -> str:
     return corrected
 
 
-def upsert_entity(entity_id: str | None, entity_type: str, name: str, description: str, aliases: list[str], facts: list[dict]) -> dict:
+def upsert_entity(entity_id: str | None, entity_type: str, name: str, description: str, aliases: list[str], facts: list[dict], replace: bool = False) -> dict:
     initialize_memory()
     entity_id = entity_id or f"{entity_type}_{uuid.uuid4().hex}"
     now = _now()
     with _connect() as db:
+        existing = db.execute("SELECT canonical_name FROM entities WHERE id=?", (entity_id,)).fetchone()
+        previous_name = existing["canonical_name"] if existing else ""
         db.execute(
             "INSERT INTO entities(id,type,canonical_name,description,created_at,updated_at) VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET type=excluded.type,canonical_name=excluded.canonical_name,description=excluded.description,updated_at=excluded.updated_at",
             (entity_id, entity_type, name, description, now, now),
         )
-        for alias in [name, *aliases]:
+        if replace:
+            db.execute("DELETE FROM aliases WHERE entity_id=?", (entity_id,))
+            db.execute("DELETE FROM facts WHERE entity_id=?", (entity_id,))
+        # Preserve a previous canonical spelling as an alias after a rename so
+        # historical journals dynamically render with the new canonical name.
+        names = [name, *aliases]
+        if previous_name and previous_name.lower() != name.lower():
+            names.append(previous_name)
+        for alias in names:
             db.execute("INSERT OR IGNORE INTO aliases(entity_id,alias,confidence,source) VALUES(?,?,1.0,'user')", (entity_id, alias))
         for fact in facts:
             db.execute(
@@ -177,6 +197,35 @@ def upsert_entity(entity_id: str | None, entity_type: str, name: str, descriptio
                 (fact.get("id") or f"fact_{uuid.uuid4().hex}", entity_id, fact["predicate"], fact["value"], float(fact.get("confidence", 1.0)), fact.get("source_session_id"), fact.get("status", "active"), now, now),
             )
     entity = next(item for item in list_entities() if item["id"] == entity_id)
+    from .memory_files import sync_memory_files
+
+    sync_memory_files()
+    return entity
+
+
+def delete_entity(entity_id: str) -> bool:
+    """Delete an entity and its cascading aliases/facts, then refresh mirrors."""
+    initialize_memory()
+    with _connect() as db:
+        db.execute("DELETE FROM entities WHERE id=?", (entity_id,))
+        deleted = db.execute("SELECT changes()").fetchone()[0] > 0
+    if deleted:
+        from .memory_files import sync_memory_files
+
+        sync_memory_files()
+    return deleted
+
+
+def promote_pending_entity(normalized_key: str, entity_type: str, name: str, description: str, aliases: list[str], facts: list[dict]) -> dict:
+    """Promote a reviewed pending candidate into the editable memory library."""
+    initialize_memory()
+    with _connect() as db:
+        pending = db.execute("SELECT 1 FROM pending_entities WHERE normalized_key=?", (normalized_key,)).fetchone()
+    if pending is None:
+        raise KeyError("pending memory not found")
+    entity = upsert_entity(None, entity_type, name, description, aliases, facts, replace=True)
+    with _connect() as db:
+        db.execute("DELETE FROM pending_entities WHERE normalized_key=?", (normalized_key,))
     from .memory_files import sync_memory_files
 
     sync_memory_files()

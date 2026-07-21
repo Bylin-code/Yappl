@@ -14,8 +14,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .settings import settings
-from .memory import canonicalize_known_aliases, correct_transcript, learn_from_session, list_entities, list_pending_entities, upsert_entity
+from .memory import canonicalize_known_aliases, correct_transcript, delete_entity, learn_from_session, list_entities, list_pending_entities, promote_pending_entity, upsert_entity
 from .provider_config import PROVIDERS, public_provider_config, save_provider_config
+from .period_summaries import ensure_period_summaries
 from .summarization import summarize_text, summarize_transcript, summary_path
 from .transcription import transcribe_mp3, transcript_path
 from .session_store import (
@@ -521,6 +522,23 @@ def journal_sessions() -> dict:
     return {"sessions": items}
 
 
+@app.get("/api/journal/period-summaries")
+def journal_period_summaries(period_type: str = Query(...)) -> dict:
+    """Return stored weekly/monthly summaries, generating stale completed periods."""
+    try:
+        items = ensure_period_summaries(period_type, journal_sessions()["sessions"])
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    sessions = {item["session_id"]: item for item in journal_sessions()["sessions"]}
+    for item in items:
+        included = [sessions[session_id] for session_id in item["session_ids"] if session_id in sessions]
+        item["session_count"] = len(included)
+        item["duration_seconds"] = sum(session["duration_seconds"] for session in included)
+        item["summary"] = canonicalize_known_aliases(item.get("summary", ""))
+        item["summary_excerpt"] = summary_preview(item["summary"], max_characters=220)
+    return {"period_type": period_type, "summaries": items}
+
+
 @app.get("/api/journal/sessions/{session_id}/audio.mp3")
 def journal_session_audio(session_id: str) -> Response:
     """Stream a saved session recording to the local journal dashboard."""
@@ -566,7 +584,67 @@ def update_memory_entity(entity_id: str, payload: MemoryEntityInput, authorizati
             payload.description,
             payload.aliases,
             [fact.model_dump() for fact in payload.facts],
+            replace=True,
         )
+    except (sqlite3.Error, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"status": "ok", "entity": entity}
+
+
+def save_dashboard_memory_entity(payload: MemoryEntityInput, entity_id: str | None = None) -> dict:
+    allowed = {"person", "place", "object", "event", "organization", "project"}
+    if payload.type not in allowed:
+        raise HTTPException(status_code=400, detail="invalid memory category")
+    if not payload.canonical_name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    try:
+        entity = upsert_entity(
+            entity_id,
+            payload.type,
+            payload.canonical_name.strip(),
+            payload.description.strip(),
+            [alias.strip() for alias in payload.aliases if alias.strip()],
+            [fact.model_dump() for fact in payload.facts if fact.predicate.strip() and fact.value.strip()],
+            replace=True,
+        )
+    except (sqlite3.Error, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"status": "ok", "entity": entity}
+
+
+@app.post("/api/memory/entities")
+def create_dashboard_memory_entity(payload: MemoryEntityInput) -> dict:
+    return save_dashboard_memory_entity(payload)
+
+
+@app.put("/api/memory/entities/{entity_id}")
+def update_dashboard_memory_entity(entity_id: str, payload: MemoryEntityInput) -> dict:
+    return save_dashboard_memory_entity(payload, entity_id)
+
+
+@app.delete("/api/memory/entities/{entity_id}")
+def delete_dashboard_memory_entity(entity_id: str) -> dict:
+    if not delete_entity(entity_id):
+        raise HTTPException(status_code=404, detail="memory not found")
+    return {"status": "ok"}
+
+
+@app.post("/api/memory/pending/{normalized_key}/promote")
+def promote_dashboard_pending_memory(normalized_key: str, payload: MemoryEntityInput) -> dict:
+    allowed = {"person", "place", "object", "event", "organization", "project"}
+    if payload.type not in allowed or not payload.canonical_name.strip():
+        raise HTTPException(status_code=400, detail="a valid category and name are required")
+    try:
+        entity = promote_pending_entity(
+            normalized_key,
+            payload.type,
+            payload.canonical_name.strip(),
+            payload.description.strip(),
+            [alias.strip() for alias in payload.aliases if alias.strip()],
+            [fact.model_dump() for fact in payload.facts if fact.predicate.strip() and fact.value.strip()],
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
     except (sqlite3.Error, ValueError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"status": "ok", "entity": entity}
