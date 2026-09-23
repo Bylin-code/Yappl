@@ -20,7 +20,7 @@ class PeriodSummaryTest(unittest.TestCase):
         self.assertEqual(summary_target_words("yearly", "brief"), 700)
 
     def test_eight_am_boundary_and_cached_weekly_summary(self) -> None:
-        zone = ZoneInfo("America/Los_Angeles")
+        zone = ZoneInfo("America/Chicago")
         early_monday = int(datetime(2025, 1, 13, 7, 0, tzinfo=zone).timestamp())
         self.assertEqual(journal_date(early_monday).isoformat(), "2025-01-12")
         sessions = [
@@ -44,7 +44,7 @@ class PeriodSummaryTest(unittest.TestCase):
             self.assertTrue((Path(temporary_directory) / "summaries" / "weekly" / "2025-01-06.md").exists())
 
     def test_completed_calendar_year_is_supported(self) -> None:
-        zone = ZoneInfo("America/Los_Angeles")
+        zone = ZoneInfo("America/Chicago")
         sessions = [{"session_id": "session_year", "completed_at_epoch": int(datetime(2025, 6, 2, 20, tzinfo=zone).timestamp()), "summary": "A meaningful day."}]
         with tempfile.TemporaryDirectory() as temporary_directory:
             with (

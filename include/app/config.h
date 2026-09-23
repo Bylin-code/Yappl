@@ -7,10 +7,14 @@ namespace yappl {
 // Centralized hardware map and behavior tuning. This file is the first place to
 // edit when changing pins, fake time, task rates, or state durations.
 struct AppConfig {
-  // This project targets an ESP32-S3 module with 16 MB flash and 8 MB OPI
-  // PSRAM. Boot stops early if a different module is selected accidentally.
-  static constexpr uint32_t requiredFlashBytes = 16 * 1024 * 1024;
-  static constexpr uint32_t requiredPsramBytes = 8 * 1024 * 1024;
+  // Standard Seeed XIAO ESP32S3: 8 MB flash and 8 MB OPI PSRAM.
+  // Startup logs a mismatch if the connected hardware does not match.
+  // Pin values below are GPIO numbers, not the printed D labels.
+  // Complete wiring: docs/xiao_wiring.md.
+  static constexpr uint32_t requiredFlashBytes = 8 * 1024 * 1024;
+  // ESP.getPsramSize() reports usable heap, slightly below physical capacity.
+  // Require at least 7 MiB usable on the 8 MiB module.
+  static constexpr uint32_t requiredPsramBytes = 7 * 1024 * 1024;
   static constexpr bool requirePsram = true;
   // INMP441 sample rate. 16 kHz is enough for speech experiments and keeps
   // buffers smaller than 44.1/48 kHz audio.
@@ -39,18 +43,18 @@ struct AppConfig {
 
   // SH1107 OLED I2C wiring.
   static constexpr uint8_t oledAddress = 0x3C;
-  static constexpr int oledSclPin = 11;
-  static constexpr int oledSdaPin = 12;
+  static constexpr int oledSclPin = 6;  // D5
+  static constexpr int oledSdaPin = 5;  // D4
 
   // INMP441 I2S input wiring. LR is wired to GND, so the driver reads left.
-  static constexpr int micBclkPin = 4;
-  static constexpr int micLrclkPin = 5;
-  static constexpr int micDataPin = 6;
+  static constexpr int micBclkPin = 7;   // D8
+  static constexpr int micLrclkPin = 8;  // D9
+  static constexpr int micDataPin = 9;  // D10
 
   // Simple IO wiring.
-  static constexpr int ledPin = 15;
-  static constexpr int piezoPin = 16;
-  static constexpr int photoresistorPin = 8;
+  static constexpr int ledPin = 43;           // D6, external active-high LED
+  static constexpr int piezoPin = 44;         // D7, passive piezo
+  static constexpr int photoresistorPin = 1;  // D0 / ADC1
 
   // ESP32 LED PWM settings. LEDC is the ESP32 hardware PWM peripheral.
   // Keeping this explicit avoids Arduino analogWrite auto-setup problems.
@@ -59,7 +63,7 @@ struct AppConfig {
   static constexpr uint8_t ledPwmResolutionBits = 8;
 
   // Button uses an external 10k pulldown, so pressed reads HIGH.
-  static constexpr int buttonPin = 3;
+  static constexpr int buttonPin = 2;  // D1
 
   // Feature flags for isolating timing/load problems without deleting code. For
   // example, set enableOled=false to test if OLED I2C is causing jitter/noise.
@@ -103,12 +107,12 @@ struct AppConfig {
   static constexpr uint32_t wifiConnectTimeoutMs = 10000;
 
   // Online time sync. NTP asks internet time servers for the current UTC time,
-  // then the TZ string converts it into local Pacific time with daylight saving.
+  // then the TZ string converts it into local Chicago time with daylight saving.
   static constexpr bool enableTimeSync = true;
   static constexpr uint32_t timeSyncTimeoutMs = 8000;
   static constexpr const char *ntpServer1 = "pool.ntp.org";
   static constexpr const char *ntpServer2 = "time.nist.gov";
-  static constexpr const char *timeZone = "PST8PDT,M3.2.0/2,M11.1.0/2";
+  static constexpr const char *timeZone = "CST6CDT,M3.2.0/2,M11.1.0/2";
 
   // Journal period rules. A period starts at 8 PM and ends at 6 AM, but the
   // ready/reminder state intentionally continues after 6 AM if the user missed

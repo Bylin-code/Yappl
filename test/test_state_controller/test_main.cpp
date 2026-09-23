@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <unity.h>
+#include <stdlib.h>
 
 #include "app/config.h"
 #include "app/state_controller.h"
@@ -60,6 +61,38 @@ void test_millis_wraparound_does_not_break_hold_duration() {
   TEST_ASSERT_EQUAL_INT(static_cast<int>(AppMode::Activation), static_cast<int>(controller.mode()));
 }
 
+void test_stale_backend_reminder_yields_to_completed_session() {
+  setenv("TZ", AppConfig::timeZone, 1);
+  tzset();
+  StateController controller;
+  AppState state;
+  TimeContext time = reminderTime();
+  time.nowEpoch = 1789875799;  // September 19, 2026, after 8 PM Chicago.
+  time.hour = 22;
+  time.hasLastYap = true;
+  time.lastYapEpoch = time.nowEpoch - 60;
+  controller.begin(1000, time);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(AppMode::IdleNight), static_cast<int>(controller.mode()));
+  controller.applyBackendMode(AppMode::Reminder, 1100);
+  controller.update(1105, state, time);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(AppMode::IdleNight), static_cast<int>(controller.mode()));
+}
+
+void test_invalid_clock_recovers_to_reminder_then_returns_to_idle_if_invalid() {
+  StateController controller;
+  AppState state;
+  TimeContext time = reminderTime();
+  time.valid = false;
+  controller.begin(1000, time);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(AppMode::IdleDay), static_cast<int>(controller.mode()));
+  time.valid = true;
+  controller.update(1100, state, time);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(AppMode::Reminder), static_cast<int>(controller.mode()));
+  time.valid = false;
+  controller.update(1200, state, time);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(AppMode::IdleDay), static_cast<int>(controller.mode()));
+}
+
 }  // namespace
 
 void setup() {
@@ -67,6 +100,8 @@ void setup() {
   UNITY_BEGIN();
   RUN_TEST(test_reminder_hold_starts_listening_and_release_guard_stops_it);
   RUN_TEST(test_millis_wraparound_does_not_break_hold_duration);
+  RUN_TEST(test_stale_backend_reminder_yields_to_completed_session);
+  RUN_TEST(test_invalid_clock_recovers_to_reminder_then_returns_to_idle_if_invalid);
   UNITY_END();
 }
 

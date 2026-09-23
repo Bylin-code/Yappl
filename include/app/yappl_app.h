@@ -58,6 +58,9 @@ class YapplApp {
   std::atomic<size_t> recordedBytes_{0};
   std::atomic<size_t> droppedAudioBytes_{0};
   uint32_t nextAudioSequence_ = 1;
+  // Once a sequence is attempted, its bytes and length must remain immutable
+  // until acknowledged. The backend uses sequence numbers for idempotency.
+  size_t inFlightAudioBatchBytes_ = 0;
   portMUX_TYPE yapEpochMux_ = portMUX_INITIALIZER_UNLOCKED;
   portMUX_TYPE backendStateMux_ = portMUX_INITIALIZER_UNLOCKED;
   uint64_t lastYapEpochThisBoot_ = 0;

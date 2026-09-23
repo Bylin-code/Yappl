@@ -191,7 +191,7 @@ function selectDay(key) {
     return;
   }
   entries.forEach((entry, index) => {
-    const time = new Date(entry.completed_at_epoch * 1000).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    const time = new Date(entry.completed_at_epoch * 1000).toLocaleTimeString(undefined, { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" });
     const transcript = entry.transcript || "Corrected transcript is not available yet.";
     const audio = entry.audio_url ? `<div class="recording"><span>Original audio</span><audio controls preload="metadata" src="${escapeHtml(entry.audio_url)}"></audio></div>` : `<p class="audio-unavailable">Original audio is not available.</p>`;
     panel.innerHTML += `<article class="entry" data-session-id="${escapeHtml(entry.session_id)}"><div class="entry-meta"><span>${time}</span><i></i><span>${Math.round(entry.duration_seconds / 60)} minutes</span>${entries.length > 1 ? `<i></i><span>Session ${index + 1}</span>` : ""}</div><div class="entry-view-toggle" role="tablist" aria-label="Journal entry view"><button class="active" type="button" data-entry-view="summary" role="tab" aria-selected="true">Summary</button><button type="button" data-entry-view="transcript" role="tab" aria-selected="false">Corrected transcript</button></div><div class="entry-body" data-entry-panel="summary"><p class="${entry.summary ? "" : "no-summary"}">${escapeHtml(entry.summary || "Summary is not available yet.")}</p></div><div class="entry-body transcript-body" data-entry-panel="transcript" hidden>${audio}<p class="${entry.transcript ? "" : "no-summary"}">${escapeHtml(transcript)}</p></div></article>`;

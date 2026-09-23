@@ -12,7 +12,7 @@ from .settings import settings
 from .summarization import generate_text
 
 
-LOCAL_TIME_ZONE = ZoneInfo("America/Los_Angeles")
+LOCAL_TIME_ZONE = ZoneInfo("America/Chicago")
 SUMMARY_POLICY_VERSION = 2
 SUMMARY_LENGTHS = {
     "weekly": (120, 300, 0.25),

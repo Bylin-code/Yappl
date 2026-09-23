@@ -21,8 +21,8 @@ constexpr uint8_t kDisplayHeight = 128;
 void drawWifiIcon(bool connected, bool inverted) {
   // Keep the icon in the upper-right corner and small enough that it does not
   // compete with the character animation.
-  constexpr int16_t x = 114;
-  constexpr int16_t y = 4;
+  constexpr int16_t x = 106;
+  constexpr int16_t y = 8;
 
   // On inverted frames the background is white, so draw the icon black.
   g_oled.setDrawColor(inverted ? 0 : 1);
@@ -48,8 +48,8 @@ void drawBackendIcon(bool connected, bool inverted) {
     return;
   }
 
-  constexpr int16_t x = 101;
-  constexpr int16_t y = 5;
+  constexpr int16_t x = 93;
+  constexpr int16_t y = 9;
   g_oled.setDrawColor(inverted ? 0 : 1);
   g_oled.drawRFrame(x, y, 7, 5, 2);
   g_oled.drawRFrame(x + 5, y + 3, 7, 5, 2);
@@ -61,8 +61,8 @@ void drawUploadIcon(bool uploading, bool inverted) {
     return;
   }
 
-  constexpr int16_t x = 92;
-  constexpr int16_t y = 4;
+  constexpr int16_t x = 84;
+  constexpr int16_t y = 8;
   g_oled.setDrawColor(inverted ? 0 : 1);
   g_oled.drawVLine(x + 3, y + 2, 7);
   g_oled.drawLine(x, y + 5, x + 3, y + 2);
@@ -81,7 +81,7 @@ void drawClock(bool timeSynced, uint8_t hour, uint8_t minute, bool inverted) {
 
   g_oled.setDrawColor(inverted ? 0 : 1);
   g_oled.setFont(u8g2_font_5x8_tf);
-  g_oled.drawStr(2, 10, text);
+  g_oled.drawStr(10, 14, text);
   g_oled.setDrawColor(1);
 }
 

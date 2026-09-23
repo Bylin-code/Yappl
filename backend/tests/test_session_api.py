@@ -4,11 +4,26 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app.main import app, summary_preview
+from app.main import app, summary_preview, metadata_path, session_dir_for_device
 from app.settings import settings
 
 
 class SessionApiTest(unittest.TestCase):
+    def test_status_and_ping_supply_current_time_without_session_history(self) -> None:
+        with patch("app.main.now_iso", return_value="2026-09-18T04:53:56.481800+00:00"):
+            status = self.client.get(
+                "/device/status", params={"device_id": "clock_test"}, headers=self.headers,
+            )
+            ping = self.client.post(
+                "/device/ping", headers=self.headers,
+                json={"device_id": "clock_test", "wifi_connected": True,
+                      "time_synced": False, "mode": "idle_day"},
+            )
+        for response in (status, ping):
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["server_time_epoch"], 1789707236)
+            self.assertEqual(response.json()["last_yap_completed_at_epoch"], 0)
+
     def test_summary_preview_returns_one_or_two_clean_sentences(self) -> None:
         summary = "The morning was spent testing Wally for a customer demonstration. Lunch was with the intern team. The evening was quiet."
         self.assertEqual(
@@ -45,6 +60,22 @@ class SessionApiTest(unittest.TestCase):
             headers={**self.headers, "Content-Type": "application/octet-stream"},
             content=body,
         )
+
+    def test_timestamped_folder_keeps_session_id_accessible(self) -> None:
+        with patch("app.main.now_iso", return_value="2026-09-18T04:53:56.481800+00:00"):
+            session_id = self.start_session()
+        folder = metadata_path(session_id).parent
+        self.assertEqual(folder.name, f"session_2026-09-18_04-53-56.481800Z__{session_id}")
+        self.assertEqual(folder, session_dir_for_device("test_device", session_id))
+        self.assertEqual(self.upload(session_id, 1, b"audio").status_code, 200)
+        response = self.client.get(f"/device/session/{session_id}/audio", headers=self.headers)
+        self.assertEqual(response.content, b"audio")
+
+        # Existing UUID-only folders remain readable during migration.
+        legacy = folder.with_name(session_id)
+        folder.rename(legacy)
+        self.assertEqual(metadata_path(session_id), legacy / "metadata.json")
+        self.assertEqual(session_dir_for_device("test_device", session_id), legacy)
 
     def test_duplicate_chunk_is_acknowledged_without_duplicate_audio(self) -> None:
         session_id = self.start_session()

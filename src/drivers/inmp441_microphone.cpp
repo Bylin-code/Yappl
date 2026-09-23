@@ -50,6 +50,8 @@ bool Inmp441Microphone::begin(uint32_t sampleRateHz) {
   config.fixed_mclk = 0;
 
   i2s_pin_config_t pins = {};
+  // INMP441 does not use MCLK. Do not route it to GPIO0 (the boot pin).
+  pins.mck_io_num = I2S_PIN_NO_CHANGE;
   // Only data_in is used; there is no speaker/output on this I2S port.
   pins.bck_io_num = AppConfig::micBclkPin;
   pins.ws_io_num = AppConfig::micLrclkPin;

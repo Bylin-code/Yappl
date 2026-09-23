@@ -115,6 +115,7 @@ BackendStatus BackendClient::ping(bool wifiConnected, bool timeSynced, const cha
 
   status.requestOk = code >= 200 && code < 300;
   if (status.requestOk) {
+    status.serverTimeEpoch = jsonUnsignedValue(response, "server_time_epoch");
     status.lastYapCompletedAtEpoch = jsonUnsignedValue(response, "last_yap_completed_at_epoch");
     status.mode = jsonStringValue(response, "mode");
   }
@@ -278,6 +279,7 @@ BackendStatus BackendClient::fetchStatus() {
 
   status.requestOk = code >= 200 && code < 300;
   if (status.requestOk) {
+    status.serverTimeEpoch = jsonUnsignedValue(body, "server_time_epoch");
     status.lastYapCompletedAtEpoch = jsonUnsignedValue(body, "last_yap_completed_at_epoch");
     status.mode = jsonStringValue(body, "mode");
   }

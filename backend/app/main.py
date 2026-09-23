@@ -260,6 +260,7 @@ def refresh_state_from_sessions(device_id: str, state: dict) -> dict:
 
 def device_status_payload(device_id: str, state: dict) -> dict:
     """Return the device state fields firmware should sync from."""
+    server_time = now_iso()
     return {
         "device_id": device_id,
         "last_seen_at": state.get("last_seen_at"),
@@ -269,17 +270,31 @@ def device_status_payload(device_id: str, state: dict) -> dict:
         "mode": state.get("mode"),
         "session_count": state.get("session_count", 0),
         "completed_session_count": state.get("completed_session_count", 0),
-        "server_time": now_iso(),
+        "server_time": server_time,
+        "server_time_epoch": int(datetime.fromisoformat(server_time).timestamp()),
     }
 
 
 def session_dir_for_device(device_id: str, session_id: str) -> Path:
-    return device_sessions_root(device_id) / session_id
+    root = device_sessions_root(device_id)
+    for path in root.glob("session_*"):
+        if path.name == session_id or path.name.endswith("__" + session_id):
+            return path
+    return root / session_id
+
+
+def session_folder_name(session_id: str, started_at: str) -> str:
+    """Sort folders by server creation time while keeping API IDs stable."""
+    created = datetime.fromisoformat(started_at).astimezone(timezone.utc)
+    return f"session_{created.strftime('%Y-%m-%d_%H-%M-%S.%fZ')}__{session_id}"
 
 
 def session_dir(session_id: str) -> Path:
     for path in (storage_root() / "devices").glob("*/sessions/session_*"):
-        if path.name == session_id:
+        if path.name == session_id or path.name.endswith("__" + session_id):
+            return path
+    for path in legacy_sessions_root().glob("session_*"):
+        if path.name == session_id or path.name.endswith("__" + session_id):
             return path
     return legacy_sessions_root() / session_id
 
@@ -690,12 +705,15 @@ def session_start(payload: SessionStart, authorization: str | None = Header(defa
     require_device_secret(authorization)
 
     session_id = f"session_{uuid.uuid4().hex}"
+    started_at = now_iso()
+    folder = device_sessions_root(payload.device_id) / session_folder_name(session_id, started_at)
+    folder.mkdir()
     metadata = {
         "session_id": session_id,
         "device_id": payload.device_id,
         "sample_rate_hz": payload.sample_rate_hz,
         "sample_format": payload.sample_format,
-        "started_at": now_iso(),
+        "started_at": started_at,
         "started_at_epoch": payload.started_at_epoch,
         "completed_at": None,
         "completed_at_epoch": None,

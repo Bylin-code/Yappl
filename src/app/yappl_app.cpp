@@ -96,10 +96,10 @@ bool YapplApp::validateHardware() {
   const uint32_t flashBytes = ESP.getFlashChipSize();
   const bool psramReady = psramFound();
   const uint32_t psramBytes = ESP.getPsramSize();
-  Serial.printf("Hardware: flash=%u MB psram=%s (%u MB) heap=%u bytes\n",
+  Serial.printf("Hardware: flash=%u MB psram=%s (%u usable bytes) heap=%u bytes\n",
                 static_cast<unsigned>(flashBytes / (1024 * 1024)),
                 psramReady ? "ready" : "missing",
-                static_cast<unsigned>(psramBytes / (1024 * 1024)),
+                static_cast<unsigned>(psramBytes),
                 static_cast<unsigned>(ESP.getFreeHeap()));
 
   if (flashBytes < AppConfig::requiredFlashBytes) {
@@ -108,7 +108,7 @@ bool YapplApp::validateHardware() {
     return false;
   }
   if (AppConfig::requirePsram && (!psramReady || psramBytes < AppConfig::requiredPsramBytes)) {
-    Serial.printf("Expected at least %u MB PSRAM\n",
+    Serial.printf("Expected at least %u MiB usable PSRAM\n",
                   static_cast<unsigned>(AppConfig::requiredPsramBytes / (1024 * 1024)));
     return false;
   }
@@ -239,6 +239,7 @@ void YapplApp::applyBackendStatus(const BackendStatus &status) {
     return;
   }
 
+  timeSync_.syncFromBackend(status.serverTimeEpoch);
   setLastYapEpochFromBackend(status.lastYapCompletedAtEpoch);
 
   AppMode backendMode = AppMode::IdleDay;
@@ -323,6 +324,8 @@ void YapplApp::resetAudioStream() {
   audioCaptureActive_ = false;
   recordedBytes_ = 0;
   droppedAudioBytes_ = 0;
+  nextAudioSequence_ = 1;
+  inFlightAudioBatchBytes_ = 0;
   xSemaphoreTake(audioMutex_, portMAX_DELAY);
   audioRingWriteIndex_ = 0;
   audioRingReadIndex_ = 0;
@@ -635,6 +638,7 @@ void YapplApp::networkTask() {
       if (pendingBackendSessionStart_) {
         activeBackendSessionId_ = "";
         nextAudioSequence_ = 1;
+        inFlightAudioBatchBytes_ = 0;
         const TimeContext time = currentTimeContext();
         activeBackendSessionId_ = backend_.startAudioSession(time.valid ? time.nowEpoch : 0, AppConfig::sampleRateHz);
         pendingBackendSessionStart_ = activeBackendSessionId_.length() == 0;
@@ -648,7 +652,13 @@ void YapplApp::networkTask() {
       while (activeBackendSessionId_.length() > 0 &&
              audioUploadBatch_ != nullptr &&
              batchesUploadedThisPass < AppConfig::audioUploadBatchesPerNetworkPass) {
-        const size_t batchBytes = peekAudioBatch(audioUploadBatch_, AppConfig::audioUploadBatchBytes);
+        // Freeze a batch across retries. A short batch can otherwise grow as
+        // recording continues, causing the same sequence number to carry
+        // different bytes after a lost response and receive HTTP 409 forever.
+        if (inFlightAudioBatchBytes_ == 0) {
+          inFlightAudioBatchBytes_ = peekAudioBatch(audioUploadBatch_, AppConfig::audioUploadBatchBytes);
+        }
+        const size_t batchBytes = inFlightAudioBatchBytes_;
         if (batchBytes == 0) {
           break;
         }
@@ -660,6 +670,7 @@ void YapplApp::networkTask() {
                                                         acknowledgedSequence);
         if (uploaded && acknowledgedSequence == nextAudioSequence_) {
           commitAudioBatch(batchBytes);
+          inFlightAudioBatchBytes_ = 0;
           ++nextAudioSequence_;
           connected = true;
         } else {

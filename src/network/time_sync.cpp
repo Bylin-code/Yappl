@@ -1,6 +1,7 @@
 #include "network/time_sync.h"
 
 #include <stdlib.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "app/config.h"
@@ -21,7 +22,7 @@ bool TimeSync::begin() {
   tzset();
 
   // configTzTime asks NTP for UTC, stores it in the ESP32 system clock, and
-  // configures localtime() to report Pacific time using the POSIX TZ string.
+  // configures localtime() to report Chicago time using the POSIX TZ string.
   configTzTime(AppConfig::timeZone, AppConfig::ntpServer1, AppConfig::ntpServer2);
   setenv("TZ", AppConfig::timeZone, 1);
   tzset();
@@ -42,6 +43,26 @@ bool TimeSync::begin() {
   uint8_t minute = 0;
   currentTime(hour, minute);
   Serial.printf("NTP time synced: %02u:%02u\n", hour, minute);
+  return true;
+}
+
+bool TimeSync::syncFromBackend(uint64_t epoch) {
+  // Reject absent/invalid values and stay within signed 32-bit time_t range.
+  // Leave a running clock alone; NTP can continue correcting it in background.
+  if (!AppConfig::enableTimeSync || isSynced() ||
+      epoch <= 1672531200ULL || epoch > 2147483647ULL) {
+    return false;
+  }
+  setenv("TZ", AppConfig::timeZone, 1);
+  tzset();
+  timeval now = {};
+  now.tv_sec = static_cast<time_t>(epoch);
+  if (settimeofday(&now, nullptr) != 0) {
+    Serial.println(F("Backend clock sync failed"));
+    return false;
+  }
+  Serial.printf("Clock synced from backend: epoch=%llu\n",
+                static_cast<unsigned long long>(epoch));
   return true;
 }
 

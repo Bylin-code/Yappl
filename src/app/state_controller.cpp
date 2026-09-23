@@ -75,7 +75,9 @@ bool StateController::update(uint32_t nowMs, const AppState &snapshot, const Tim
       break;
 
     case AppMode::Reminder:
-      if (pressed && nowMs - buttonPressedAtMs_ >= AppConfig::reminderHoldToActivateMs) {
+      if (restingMode(time) != AppMode::Reminder) {
+        enterMode(restingMode(time), nowMs);
+      } else if (pressed && nowMs - buttonPressedAtMs_ >= AppConfig::reminderHoldToActivateMs) {
         enterMode(AppMode::Activation, nowMs);
       }
       break;

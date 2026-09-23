@@ -13,6 +13,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalized_description(entity_type: str, description: str) -> str:
+    """Keep person cards scannable; detailed knowledge belongs in facts."""
+    value = " ".join(description.split()).strip()
+    if entity_type != "person" or len(value.split()) <= 30:
+        return value
+    shortened = " ".join(value.split()[:30]).rstrip(" ,;:-")
+    return shortened if shortened.endswith((".", "!", "?")) else shortened + "."
+
+
 def _db_path() -> Path:
     path = Path(settings.yappl_storage_dir) / "memory.sqlite3"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,6 +45,7 @@ def initialize_memory() -> None:
                 type TEXT NOT NULL,
                 canonical_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 description TEXT NOT NULL DEFAULT '',
+                description_source TEXT NOT NULL DEFAULT 'ai',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -88,6 +98,10 @@ def initialize_memory() -> None:
             DROP TABLE IF EXISTS personal_attributes;
             """
         )
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(entities)")}
+        if "description_source" not in columns:
+            db.execute("ALTER TABLE entities ADD COLUMN description_source TEXT NOT NULL DEFAULT 'ai'")
+        db.execute("UPDATE entities SET description_source='user' WHERE id IN ('person_ylang','project_yappl')")
         if db.execute("SELECT 1 FROM memory_meta WHERE key='initial_seeds_created'").fetchone() is None:
             db.execute("INSERT INTO memory_meta(key,value) VALUES('initial_seeds_created','true')")
             should_seed = True
@@ -115,8 +129,8 @@ def _seed_entity(entity_id: str, entity_type: str, name: str, description: str, 
     now = _now()
     with _connect() as db:
         db.execute(
-            "INSERT OR IGNORE INTO entities(id,type,canonical_name,description,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-            (entity_id, entity_type, name, description, now, now),
+            "INSERT OR IGNORE INTO entities(id,type,canonical_name,description,description_source,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            (entity_id, entity_type, name, description, "user", now, now),
         )
         for alias in [name, *aliases]:
             db.execute(
@@ -169,17 +183,18 @@ def canonicalize_known_aliases(text: str) -> str:
     return corrected
 
 
-def upsert_entity(entity_id: str | None, entity_type: str, name: str, description: str, aliases: list[str], facts: list[dict], replace: bool = False) -> dict:
+def upsert_entity(entity_id: str | None, entity_type: str, name: str, description: str, aliases: list[str], facts: list[dict], replace: bool = False, description_source: str = "user") -> dict:
     initialize_memory()
     entity_id = entity_id or f"{entity_type}_{uuid.uuid4().hex}"
+    description = _normalized_description(entity_type, description)
     now = _now()
     with _connect() as db:
         existing = db.execute("SELECT canonical_name FROM entities WHERE id=?", (entity_id,)).fetchone()
         previous_name = existing["canonical_name"] if existing else ""
         db.execute(
-            "INSERT INTO entities(id,type,canonical_name,description,created_at,updated_at) VALUES(?,?,?,?,?,?) "
-            "ON CONFLICT(id) DO UPDATE SET type=excluded.type,canonical_name=excluded.canonical_name,description=excluded.description,updated_at=excluded.updated_at",
-            (entity_id, entity_type, name, description, now, now),
+            "INSERT INTO entities(id,type,canonical_name,description,description_source,created_at,updated_at) VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET type=excluded.type,canonical_name=excluded.canonical_name,description=excluded.description,description_source=excluded.description_source,updated_at=excluded.updated_at",
+            (entity_id, entity_type, name, description, description_source, now, now),
         )
         if replace:
             db.execute("DELETE FROM aliases WHERE entity_id=?", (entity_id,))
@@ -273,7 +288,7 @@ def _stage_or_promote_entity(session_id: str, item: dict) -> dict | None:
             return None
         db.execute("DELETE FROM pending_entities WHERE normalized_key=?", (normalized_key,))
     try:
-        return upsert_entity(None, entity_type, name, description, combined_aliases, combined_facts)
+        return upsert_entity(None, entity_type, name, description, combined_aliases, combined_facts, description_source="ai")
     except sqlite3.IntegrityError:
         return None
 
@@ -415,6 +430,7 @@ def learn_from_session(session_id: str, transcript: str) -> dict:
                 "type": item["type"],
                 "name": item["canonical_name"],
                 "description": item["description"],
+                "description_source": item.get("description_source", "ai"),
                 "aliases": [alias["alias"] for alias in item["aliases"]],
                 "facts": [
                     {"predicate": fact["predicate"], "value": fact["value"], "status": fact["status"]}
@@ -438,6 +454,7 @@ def learn_from_session(session_id: str, transcript: str) -> dict:
 Return strict JSON with this shape:
 {"facts":[{"entity_id":"...","predicate":"short_snake_case","value":"...","replace_existing":false}],
 "aliases":[{"entity_id":"...","alias":"exact transcript spelling","confidence":0.0}],
+"description_updates":[{"entity_id":"...","description":"concise current overview"}],
 "new_entities":[{"type":"person|place|object|event|project|organization","canonical_name":"...","description":"...","aliases":[],
 "facts":[{"predicate":"...","value":"..."}]}]}.
 Suggest an alias for a known entity only when the exact spelling occurs in the transcript, context clearly identifies
@@ -451,7 +468,11 @@ the transcript explicitly adds, changes, or contradicts them. Set replace_existi
 clearly replaces an older value for the same predicate; otherwise leave it false. Do not infer emotions,
 personality traits, diagnoses, temporary moods, or facts not directly stated. Do not save ordinary one-day events.
 Good memories include relationships, occupations, ownership of projects, stable preferences, and durable
-biographical context. If there is nothing durable, return {"facts":[],"aliases":[],"new_entities":[]}. Return JSON only."""
+biographical context. For each mentioned entity whose description_source is "ai", include a description_update.
+Person descriptions must be short identity blurbs of at most 30 words: relationship or primary role only. Put
+education, history, activities, dynamics, and other details in facts instead. Keep other descriptions concise and
+current. Never update descriptions whose description_source is "user".
+If there is nothing durable, return {"facts":[],"aliases":[],"description_updates":[],"new_entities":[]}. Return JSON only."""
     try:
         # Reasoning-capable models may spend part of this allowance on an
         # internal thinking block before emitting the JSON text response.
@@ -512,6 +533,19 @@ biographical context. If there is nothing durable, return {"facts":[],"aliases":
             )
             if db.execute("SELECT changes()").fetchone()[0]:
                 learned_aliases.append({"entity_id": entity_id, "alias": alias, "confidence": min(confidence, 1.0)})
+        description_updates = []
+        for update in payload.get("description_updates", [])[:20]:
+            entity_id = update.get("entity_id")
+            entity_type = next((item["type"] for item in entities if item["id"] == entity_id), "")
+            description = _normalized_description(entity_type, str(update.get("description", "")).strip()[:700])
+            if entity_id not in valid_ids or not description:
+                continue
+            db.execute(
+                "UPDATE entities SET description=?,updated_at=? WHERE id=? AND description_source!='user'",
+                (description, now, entity_id),
+            )
+            if db.execute("SELECT changes()").fetchone()[0]:
+                description_updates.append({"entity_id": entity_id, "description": description})
     new_entities = []
     staged_entities = []
     for item in payload.get("new_entities", [])[:10]:
@@ -523,4 +557,40 @@ biographical context. If there is nothing durable, return {"facts":[],"aliases":
     from .memory_files import sync_memory_files
 
     sync_memory_files()
-    return {"memory_learning_status": "complete", "memory_facts_learned": learned, "memory_ai_aliases_learned": learned_aliases, "memory_entities_learned": new_entities, "memory_entities_staged": staged_entities, "memory_provider": provider, "memory_model": model}
+    return {"memory_learning_status": "complete", "memory_facts_learned": learned, "memory_ai_aliases_learned": learned_aliases, "memory_descriptions_updated": description_updates, "memory_entities_learned": new_entities, "memory_entities_staged": staged_entities, "memory_provider": provider, "memory_model": model}
+
+
+def refresh_ai_descriptions() -> list[dict]:
+    """One-shot rebuild of AI-managed descriptions from authoritative memory."""
+    from .summarization import generate_text
+
+    entities = [item for item in list_entities() if item.get("description_source", "ai") != "user"]
+    if not entities:
+        return []
+    source = json.dumps(
+        [{"id": item["id"], "type": item["type"], "name": item["canonical_name"], "description": item["description"], "aliases": [a["alias"] for a in item["aliases"]], "facts": [{"predicate": f["predicate"], "value": f["value"]} for f in item["facts"]]} for item in entities],
+        ensure_ascii=False,
+    )
+    prompt = """Rewrite the short dashboard description for every supplied memory entity using all available facts.
+Return strict JSON: {"description_updates":[{"entity_id":"...","description":"..."}]}.
+Person descriptions must be short identity blurbs of at most 30 words, limited to relationship or primary role.
+Education, history, activities, dynamics, and other details belong in facts. Keep other descriptions concise.
+Do not invent details. Return JSON only."""
+    text, _, _ = generate_text(prompt, source, max_tokens=3000)
+    payload = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.IGNORECASE))
+    valid_ids = {item["id"] for item in entities}
+    updates = []
+    with _connect() as db:
+        for update in payload.get("description_updates", []):
+            entity_id = update.get("entity_id")
+            entity_type = next((item["type"] for item in entities if item["id"] == entity_id), "")
+            description = _normalized_description(entity_type, str(update.get("description", "")).strip()[:700])
+            if entity_id not in valid_ids or not description:
+                continue
+            db.execute("UPDATE entities SET description=?,updated_at=? WHERE id=? AND description_source='ai'", (description, _now(), entity_id))
+            if db.execute("SELECT changes()").fetchone()[0]:
+                updates.append({"entity_id": entity_id, "description": description})
+    from .memory_files import sync_memory_files
+
+    sync_memory_files()
+    return updates

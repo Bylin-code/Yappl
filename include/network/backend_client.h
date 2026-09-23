@@ -9,6 +9,7 @@ namespace yappl {
 // while the backend is still proving basic connectivity.
 struct BackendStatus {
   bool requestOk = false;
+  uint64_t serverTimeEpoch = 0;
   uint64_t lastYapCompletedAtEpoch = 0;
   String mode;
 };
