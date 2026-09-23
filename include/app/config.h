@@ -114,12 +114,10 @@ struct AppConfig {
   static constexpr const char *ntpServer2 = "time.nist.gov";
   static constexpr const char *timeZone = "CST6CDT,M3.2.0/2,M11.1.0/2";
 
-  // Journal period rules. A period starts at 8 PM and ends at 6 AM, but the
-  // ready/reminder state intentionally continues after 6 AM if the user missed
-  // that period. At the next 8 PM, a fresh period starts and Yappl becomes
-  // ready again unless a yap happens in that new period.
-  static constexpr uint8_t journalPeriodStartHour = 20;
-  static constexpr uint8_t journalPeriodEndHour = 6;
+  // Ready/reminder requires more than 12 hours since the last completed yap
+  // and local time from 8 PM until midnight. No history counts as overdue.
+  static constexpr uint8_t reminderStartHour = 20;
+  static constexpr uint32_t reminderInactivitySeconds = 12 * 60 * 60;
 
   // Visual idle mode switches to night styling during this local time window.
   static constexpr uint8_t nightStartHour = 20;

@@ -26,6 +26,11 @@ Open the local journal dashboard on this computer:
 http://localhost:8000
 ```
 
+Recordings are stored only in `backend/data/devices/<device_id>/sessions/`
+(`/data/devices/<device_id>/sessions/` inside Docker).
+The current device is `yappl_dev_001`. The backend does not read a separate
+legacy session directory or use archive/demo storage.
+
 Other devices on the same network can use the backend computer's LAN address,
 for example `http://10.0.0.144:8000`. The dashboard is intentionally read-only
 and has no login in local mode, so only expose port 8000 on a trusted network.

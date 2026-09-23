@@ -93,6 +93,40 @@ void test_invalid_clock_recovers_to_reminder_then_returns_to_idle_if_invalid() {
   TEST_ASSERT_EQUAL_INT(static_cast<int>(AppMode::IdleDay), static_cast<int>(controller.mode()));
 }
 
+void test_ready_requires_evening_and_more_than_twelve_hours() {
+  struct Case {
+    uint8_t hour;
+    bool hasLastYap;
+    int64_t elapsed;
+    AppMode expected;
+  };
+  const Case cases[] = {
+      {19, true, 86400, AppMode::IdleDay},
+      {20, true, 43200, AppMode::IdleNight},
+      {20, true, 43201, AppMode::Reminder},
+      {23, true, 43201, AppMode::Reminder},
+      {21, true, 43199, AppMode::IdleNight},
+      {21, true, -60, AppMode::IdleNight},
+      {0, true, 86400, AppMode::IdleNight},
+      {8, false, 0, AppMode::IdleDay},
+      {20, false, 0, AppMode::Reminder},
+  };
+  StateController controller;
+  AppState state;
+  uint32_t nowMs = 1000;
+  for (const auto &value : cases) {
+    TimeContext time = reminderTime();
+    time.hour = value.hour;
+    time.hasLastYap = value.hasLastYap;
+    time.lastYapEpoch = static_cast<uint64_t>(static_cast<int64_t>(time.nowEpoch) - value.elapsed);
+    // Verify both clock-driven transitions and the mode selected on boot.
+    controller.update(nowMs++, state, time);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(value.expected), static_cast<int>(controller.mode()));
+    controller.begin(nowMs++, time);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(value.expected), static_cast<int>(controller.mode()));
+  }
+}
+
 }  // namespace
 
 void setup() {
@@ -102,6 +136,7 @@ void setup() {
   RUN_TEST(test_millis_wraparound_does_not_break_hold_duration);
   RUN_TEST(test_stale_backend_reminder_yields_to_completed_session);
   RUN_TEST(test_invalid_clock_recovers_to_reminder_then_returns_to_idle_if_invalid);
+  RUN_TEST(test_ready_requires_evening_and_more_than_twelve_hours);
   UNITY_END();
 }
 

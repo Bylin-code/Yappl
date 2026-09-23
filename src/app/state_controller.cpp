@@ -3,36 +3,6 @@
 #include "app/config.h"
 
 namespace yappl {
-namespace {
-
-uint64_t latestJournalPeriodStartEpoch(uint64_t nowEpoch) {
-  // The product rule is based on the latest 8 PM local start, not midnight.
-  // Before 8 PM, the relevant period is the one that started yesterday at 8 PM.
-  time_t now = static_cast<time_t>(nowEpoch);
-  tm local = {};
-  if (localtime_r(&now, &local) == nullptr) {
-    return 0;
-  }
-
-  local.tm_hour = AppConfig::journalPeriodStartHour;
-  local.tm_min = 0;
-  local.tm_sec = 0;
-  local.tm_isdst = -1;
-
-  time_t start = mktime(&local);
-  if (start < 0) {
-    return 0;
-  }
-
-  if (now < start) {
-    start -= 24 * 60 * 60;
-  }
-
-  return static_cast<uint64_t>(start);
-}
-
-}  // namespace
-
 void StateController::begin(uint32_t nowMs, const TimeContext &time) {
   // Pick the correct boot mode from real clock + stored yap history.
   mode_ = restingMode(time);
@@ -172,27 +142,17 @@ bool StateController::isNightTime(const TimeContext &time) const {
   return time.hour >= AppConfig::nightStartHour || time.hour < AppConfig::nightEndHour;
 }
 
-bool StateController::hasYappedInCurrentJournalPeriod(const TimeContext &time) const {
-  if (!time.valid || !time.hasLastYap) {
-    return false;
-  }
-
-  const uint64_t periodStart = latestJournalPeriodStartEpoch(time.nowEpoch);
-  if (periodStart == 0) {
-    return false;
-  }
-
-  return time.lastYapEpoch >= periodStart && time.lastYapEpoch <= time.nowEpoch;
-}
-
 AppMode StateController::restingMode(const TimeContext &time) const {
-  // If time is invalid, avoid nagging. The device cannot know which 8 PM
-  // journal period applies yet.
+  // Without a valid local clock, avoid prompting.
   if (!time.valid) {
     return AppMode::IdleDay;
   }
 
-  if (!hasYappedInCurrentJournalPeriod(time)) {
+  // Guard against a future completion timestamp before unsigned subtraction.
+  const bool overdue = !time.hasLastYap ||
+      (time.nowEpoch > time.lastYapEpoch &&
+       time.nowEpoch - time.lastYapEpoch > AppConfig::reminderInactivitySeconds);
+  if (time.hour >= AppConfig::reminderStartHour && overdue) {
     return AppMode::Reminder;
   }
   return isNightTime(time) ? AppMode::IdleNight : AppMode::IdleDay;

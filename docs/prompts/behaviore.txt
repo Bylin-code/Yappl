@@ -15,13 +15,13 @@ The hierarchy is split into two, states and acts
 
 States:
 - Idle Day
-    - User has yapped In the past 18 hours and the current time is after 8am and before 8pm
+    - Current local time is from 8am until 8pm
     - LED is off
     - Default act: eyes looking straight and not moving
     - Act: blinking (has to animate the eyelids actually moving up and down)
     - Act: looking left and right (takes longer than blinking)
 - Reminder
-    - User has not yapped in the past 18 hours
+    - More than 12 hours have elapsed since the last completed yap (or no previous yap), and local time is from 8pm until midnight
         - If the light in the room is on, the LED breathes slowly from 0% to 50% to 0% pwm at a period of once every 3 seconds. 
         - If the light is off, LED breathes 0% to 50% to 0% at once every 1 second, then off for 0.5 seconds, then flashes quickly three times, then off for 0.5 seconds, and this sequence repeats when light is off and the user hasn’t yapped.
     - Default act: eyes anxiously looking left and right with eyelids drooped down and a sweat down the face
@@ -50,5 +50,5 @@ States:
     - Eyes closes to dark and screen displays GOOD NIGHT! to flash three times.
 
 - Idle Night
-    - Occurs when the user has yapped in the past 18 hours and time is after 8pm before 8am
+    - Occurs from 8pm until 8am whenever the Reminder conditions are not met
     - The two eyes are sleeping with ZZZ popping out one by one

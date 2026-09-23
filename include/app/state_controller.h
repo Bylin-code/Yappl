@@ -34,7 +34,6 @@ class StateController {
 
  private:
   bool isNightTime(const TimeContext &time) const;
-  bool hasYappedInCurrentJournalPeriod(const TimeContext &time) const;
   AppMode restingMode(const TimeContext &time) const;
   bool enterMode(AppMode mode, uint32_t nowMs);
 

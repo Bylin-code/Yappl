@@ -149,10 +149,6 @@ def device_sessions_root(device_id: str) -> Path:
     return root
 
 
-def legacy_sessions_root() -> Path:
-    return storage_root() / "sessions"
-
-
 def session_snapshot(metadata: dict) -> dict:
     """Return the session fields that belong in a device state snapshot."""
     return {
@@ -174,7 +170,6 @@ def sessions_for_device(device_id: str) -> list[dict]:
     sessions: list[dict] = []
 
     metadata_paths = list(device_sessions_root(device_id).glob("session_*/metadata.json"))
-    metadata_paths.extend(legacy_sessions_root().glob("session_*/metadata.json"))
 
     for path in metadata_paths:
         try:
@@ -293,10 +288,7 @@ def session_dir(session_id: str) -> Path:
     for path in (storage_root() / "devices").glob("*/sessions/session_*"):
         if path.name == session_id or path.name.endswith("__" + session_id):
             return path
-    for path in legacy_sessions_root().glob("session_*"):
-        if path.name == session_id or path.name.endswith("__" + session_id):
-            return path
-    return legacy_sessions_root() / session_id
+    raise HTTPException(status_code=404, detail="session files not found")
 
 
 def metadata_path(session_id: str, device_id: str | None = None) -> Path:
